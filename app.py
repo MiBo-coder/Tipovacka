@@ -31,7 +31,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- PŘIPOJENÍ ---
+# --- PŘIPOJENÍ (Resource - drží se v paměti stále) ---
 @st.cache_resource
 def get_connection():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -92,6 +92,9 @@ def save_tips_batch(ws_tipy, user_email, tips_to_save, existing_tips):
         ws_tipy.update_cells(updates)
     if new_rows:
         ws_tipy.append_rows(new_rows)
+    
+    # DŮLEŽITÉ: Po uložení vymažeme cache, aby se načetla čerstvá data
+    st.cache_data.clear()
 
 # --- LOGIKA BODŮ ---
 def spocitej_body_zapas(tip_d, tip_h, real_d, real_h, team_d, team_h, faze):
@@ -139,20 +142,24 @@ def spocitej_dlouhodobe_body(user_row, official_results):
             body += 4
     return body
 
-# --- DATA LOADING ---
-def load_data(sh):
-    ws_zapasy = sh.worksheet("Zapasy")
-    ws_tipy = sh.worksheet("Tipy")
-    ws_users = sh.worksheet("Uzivatele")
-    try: ws_nastaveni = sh.worksheet("Nastaveni")
-    except: ws_nastaveni = None
-    
-    zapasy = ws_zapasy.get_all_records()
-    tipy = ws_tipy.get_all_records()
-    users = ws_users.get_all_records()
-    nastaveni = ws_nastaveni.get_all_records() if ws_nastaveni else []
-    
-    return zapasy, tipy, users, nastaveni, ws_users, ws_tipy, ws_zapasy, ws_nastaveni
+# --- DATA LOADING (CACHED) ---
+# TTL=30 znamená, že data se načtou z Googlu max jednou za 30 vteřin.
+# Jinak se berou z paměti serveru. To šetří API limity.
+@st.cache_data(ttl=30)
+def load_data_values():
+    sh = get_connection()
+    # Načteme hodnoty (data)
+    zapasy = sh.worksheet("Zapasy").get_all_records()
+    tipy = sh.worksheet("Tipy").get_all_records()
+    users = sh.worksheet("Uzivatele").get_all_records()
+    try: nastaveni = sh.worksheet("Nastaveni").get_all_records()
+    except: nastaveni = []
+    return zapasy, tipy, users, nastaveni
+
+# Pomocná funkce pro získání objektů worksheetů (pro zápis)
+def get_worksheets():
+    sh = get_connection()
+    return sh.worksheet("Zapasy"), sh.worksheet("Tipy"), sh.worksheet("Uzivatele"), sh.worksheet("Nastaveni")
 
 # --- MAIN APP ---
 def main():
@@ -163,10 +170,14 @@ def main():
         st.session_state['logged_in'] = False
 
     try:
-        sh = get_connection()
-        zapasy, tipy, users, nastaveni_data, ws_users, ws_tipy, ws_zapasy, ws_nastaveni = load_data(sh)
+        # Načtení dat (cachované)
+        zapasy, tipy, users, nastaveni_data = load_data_values()
+        
+        # Objekty pro zápis (necachované, volají se jen při zápisu)
+        ws_zapasy, ws_tipy, ws_users, ws_nastaveni = get_worksheets()
+        
     except Exception as e:
-        st.error(f"Chyba databáze: {e}")
+        st.error(f"Chyba databáze (zkus chvíli počkat a refresh): {e}")
         st.stop()
 
     config = {row['Klic']: row['Hodnota'] for row in nastaveni_data}
@@ -227,6 +238,7 @@ def main():
                     elif not r_email or not r_name or not r_pass: st.error("Vyplň všechna pole.")
                     else:
                         ws_users.append_row([r_email, r_name, r_pass, 0, 'user', '', '', '', '', '', '', 'NE'])
+                        st.cache_data.clear() # Vyčistit cache po registraci
                         st.session_state['logged_in'] = True
                         st.session_state['user_email'] = r_email
                         st.session_state['user_name'] = r_name
@@ -305,7 +317,7 @@ def main():
 
         # --- ZÁLOŽKY ---
         tabs = st.tabs([
-            "🏒 Tipování", "🕵️ Přehled tipů", "🏆 Tipy na vítěze", "🥇 Žebříček", "🎯 Statistiky", "⚙️ Profil", "📜 Pravidla", "💰 Startovné, Bank a Výhry"
+            "🏒 Tipování", "🕵️ Přehled tipů", "🏆 Tipy na vítěze", "🥇 Žebříček", "🎯 Statistiky", "⚙️ Profil", "📜 Pravidla", "Startovné, Bank a Výhry"
         ])
         
         tab_matches, tab_all_tips, tab_long, tab_leaderboard, tab_stats, tab_profile, tab_rules, tab_bank = tabs
@@ -374,14 +386,24 @@ def main():
         # 3. DLOUHODOBÉ
         with tab_long:
             st.header("Tipy na vítěze a medailisty")
+            
+            me_idx = next((i for i, u in enumerate(users) if str(u['Email']) == st.session_state['user_email']), None)
+            mr = users[me_idx] if me_idx is not None else {}
+            has_complete_tips = (
+                str(mr.get('Tip_Vitez', '')).strip() != '' and
+                str(mr.get('Tip_Med1', '')).strip() != '' and
+                str(mr.get('Tip_Med2', '')).strip() != '' and
+                str(mr.get('Tip_Med3', '')).strip() != ''
+            )
+            if has_complete_tips: st.success("✅ **Máte natipováno.** Svůj tip můžete do začátku turnaje změnit.")
+            else: st.warning("⚠️ **Pozor:** Chybí vám natipovat vítěze a medailisty!")
+
             st.info("Tipni si vítěze a medailisty. Uzávěrka před začátkem turnaje!")
             lck = is_past_deadline(DEADLINE)
             if lck: st.warning(f"Sázky uzavřeny ({DEADLINE})")
             else: st.success(f"Otevřeno do {DEADLINE}")
             
             ht = get_all_teams(zapasy)
-            me_idx = next((i for i, u in enumerate(users) if str(u['Email']) == st.session_state['user_email']), None)
-            mr = users[me_idx] if me_idx is not None else {}
             
             with st.form("lb"):
                 sw = st.selectbox("Celkový Vítěz", ht, index=ht.index(mr.get('Tip_Vitez')) if mr.get('Tip_Vitez') in ht else 0, disabled=lck)
@@ -395,6 +417,7 @@ def main():
                     ws_users.update_cell(me_idx+2, 8, m1)
                     ws_users.update_cell(me_idx+2, 9, m2)
                     ws_users.update_cell(me_idx+2, 10, m3)
+                    st.cache_data.clear() # Smazat cache
                     st.success("Uloženo!"); st.rerun()
 
         # 4. ŽEBŘÍČEK
@@ -510,6 +533,7 @@ def main():
                         ws_users.update_cell(current_u_idx+2, 6, final_team)
                         st.session_state['user_name'] = new_name
                         st.session_state['user_team'] = final_team
+                        st.cache_data.clear()
                         st.success("Uloženo!"); time.sleep(1); st.rerun()
 
         # 7. PRAVIDLA
@@ -534,7 +558,7 @@ def main():
 
         # 8. STARTOVNÉ (QR KÓD)
         with tab_bank:
-            st.header("💰 Startovné, Bank a Výhry")
+            st.header("Startovné, Bank a Výhry")
             me = next((u for u in users if str(u['Email']) == st.session_state['user_email']), None)
             zaplaceno = str(me.get('Zaplaceno', 'NE')).upper() if me else 'NE'
             
@@ -575,6 +599,7 @@ def main():
                         if st.form_submit_button("Uložit"):
                             cell = ws_zapasy.find(str(sid))
                             ws_zapasy.update_cell(cell.row, 5, d); ws_zapasy.update_cell(cell.row, 6, h)
+                            st.cache_data.clear()
                             st.success("OK"); st.rerun()
 
                 with st.expander("Konec turnaje (Medailisté)"):
@@ -596,6 +621,7 @@ def main():
                                 if c: ws_nastaveni.update_cell(c.row, 2, v)
                                 else: ws_nastaveni.append_row([k, v])
                             upd('vitez_turnaje', w); upd('med_1', m1); upd('med_2', m2); upd('med_3', m3)
+                            st.cache_data.clear()
                             st.success("Turnaj uzavřen!"); st.rerun()
                 
                 with st.expander("Platby"):
@@ -607,6 +633,7 @@ def main():
                     new_s = st.radio("Stav", ["ANO", "NE"], index=0 if curr=="ANO" else 1)
                     if st.button("Změnit stav"):
                         ws_users.update_cell(u_idx+2, 12, new_s)
+                        st.cache_data.clear()
                         st.success("Změněno"); st.rerun()
 
 if __name__ == "__main__":
