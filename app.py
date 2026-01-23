@@ -237,7 +237,7 @@ def main():
                     elif name_exists: st.error(f"Jméno '{r_name}' už někdo používá.")
                     elif not r_email or not r_name or not r_pass: st.error("Vyplň všechna pole.")
                     else:
-                        ws_users.append_row([r_email, r_name, r_pass, 0, 'user', '', '', '', '', '', '', 'NE'])
+                        ws_users.append_row([r_email, r_name, r_pass, 0, 'user', '', '', '', '', '', 'NE', ''])
                         st.cache_data.clear() # Vyčistit cache po registraci
                         st.session_state['logged_in'] = True
                         st.session_state['user_email'] = r_email
