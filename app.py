@@ -317,7 +317,7 @@ def main():
 
         # --- ZÁLOŽKY ---
         tabs = st.tabs([
-            "🏒 Tipování", "🕵️ Přehled tipů", "🏆 Tipy na vítěze", "🥇 Žebříček", "🎯 Statistiky", "⚙️ Profil", "📜 Pravidla", "Startovné, Bank a Výhry"
+            "🏒 Tipování", "🕵️ Přehled tipů", "🏆 Tipy na vítěze", "🥇 Žebříček", "🎯 Statistiky", "⚙️ Profil", "📜 Pravidla", "💰 Startovné, Bank a Výhry"
         ])
         
         tab_matches, tab_all_tips, tab_long, tab_leaderboard, tab_stats, tab_profile, tab_rules, tab_bank = tabs
@@ -558,7 +558,7 @@ def main():
 
         # 8. STARTOVNÉ (QR KÓD)
         with tab_bank:
-            st.header("Startovné, Bank a Výhry")
+            st.header("💰 Startovné, Bank a Výhry")
             me = next((u for u in users if str(u['Email']) == st.session_state['user_email']), None)
             zaplaceno = str(me.get('Zaplaceno', 'NE')).upper() if me else 'NE'
             
