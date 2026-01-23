@@ -5,22 +5,39 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import time
 import math
+import os
 
-# --- KONFIGURACE ---
+# --- KONFIGURACE A CSS ---
 st.set_page_config(page_title="Tipovačka hokej - Olympiáda 2026", layout="wide")
 
-# --- PŘIPOJENÍ (Obojživelné: Local vs Cloud) ---
+st.markdown("""
+<style>
+    /* Zvětšení písma */
+    html, body, [class*="css"] {
+        font-size: 18px !important;
+    }
+    /* Zvýraznění přesných tipů */
+    .exact-match {
+        background-color: #ffd700;
+        color: black;
+        font-weight: bold;
+        padding: 4px;
+        border-radius: 4px;
+    }
+    /* Zúžení formuláře pro tipování */
+    .stNumberInput {
+        max-width: 150px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# --- PŘIPOJENÍ ---
 @st.cache_resource
 def get_connection():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    
-    # 1. Zkusíme najít lokální soubor (pro tvůj počítač)
-    import os
     if os.path.exists('credentials.json'):
         creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
     else:
-        # 2. Pokud soubor není, jsme na Cloudu -> použijeme Secrets
-        # Vytvoříme dict z Streamlit secrets objektu
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     
@@ -46,10 +63,35 @@ def is_past_deadline(deadline_str):
 
 def get_all_teams(zapasy):
     teams = set()
+    ignored = ["čtvrtfinále", "semifinále", "finále", "o 3. místo", "o bronz", "vítěz"]
     for z in zapasy:
-        if z['Domaci']: teams.add(z['Domaci'])
-        if z['Hoste']: teams.add(z['Hoste'])
+        d, h = str(z['Domaci']), str(z['Hoste'])
+        if not any(x in d.lower() for x in ignored): teams.add(d)
+        if not any(x in h.lower() for x in ignored): teams.add(h)
     return sorted(list(teams))
+
+# --- BATCH UPDATE ---
+def save_tips_batch(ws_tipy, user_email, tips_to_save, existing_tips):
+    updates = []
+    new_rows = []
+    
+    existing_map = {}
+    for i, row in enumerate(existing_tips):
+        existing_map[(str(row['Email']), str(row['Zapas_ID']))] = i + 2
+        
+    for zid, (d, h) in tips_to_save.items():
+        key = (user_email, str(zid))
+        if key in existing_map:
+            row_idx = existing_map[key]
+            updates.append(gspread.Cell(row_idx, 3, d))
+            updates.append(gspread.Cell(row_idx, 4, h))
+        else:
+            new_rows.append([user_email, zid, d, h])
+            
+    if updates:
+        ws_tipy.update_cells(updates)
+    if new_rows:
+        ws_tipy.append_rows(new_rows)
 
 # --- LOGIKA BODŮ ---
 def spocitej_body_zapas(tip_d, tip_h, real_d, real_h, team_d, team_h, faze):
@@ -114,7 +156,8 @@ def load_data(sh):
 
 # --- MAIN APP ---
 def main():
-    st.title("🏒 Tipovačka hokej - Olympiáda 2026")
+    col1, col2 = st.columns([1, 4])
+    col2.title("🏒 Tipovačka hokej - Olympiáda 2026")
 
     if 'logged_in' not in st.session_state:
         st.session_state['logged_in'] = False
@@ -136,21 +179,22 @@ def main():
     # --- LOGIN & REGISTRACE ---
     if not st.session_state['logged_in']:
         tab_login, tab_reg = st.tabs(["🔑 Přihlášení", "📝 Registrace"])
-        
+        contact_info = "🆘 Zapomněl jsi heslo nebo máš problém? Napiš na: **tipovacka.mibo@gmail.com**"
+
         with tab_login:
             with st.form("login_form"):
                 email = st.text_input("Email")
                 password = st.text_input("Heslo", type="password")
                 if st.form_submit_button("Vstoupit"):
+                    email_clean = email.strip().lower()
                     df_users = pd.DataFrame(users)
                     if not df_users.empty:
-                        df_users['Email'] = df_users['Email'].astype(str)
+                        df_users['Email_Lower'] = df_users['Email'].astype(str).str.strip().str.lower()
                         df_users['Heslo'] = df_users['Heslo'].astype(str)
-                        user = df_users[df_users['Email'] == email]
-                        
+                        user = df_users[df_users['Email_Lower'] == email_clean]
                         if not user.empty and str(user.iloc[0]['Heslo']) == password:
                             st.session_state['logged_in'] = True
-                            st.session_state['user_email'] = email
+                            st.session_state['user_email'] = str(user.iloc[0]['Email'])
                             st.session_state['user_name'] = user.iloc[0]['Jmeno']
                             st.session_state['user_role'] = user.iloc[0]['Role']
                             st.session_state['user_team'] = user.iloc[0].get('Tym', '')
@@ -159,103 +203,123 @@ def main():
                             st.error("Chybné jméno nebo heslo.")
                     else:
                         st.error("Databáze uživatelů je prázdná.")
+            st.markdown(contact_info)
 
         with tab_reg:
-            st.info("Zde si vytvoř účet.")
+            st.info("Zadej svůj email a zvol si heslo. Jméno musí být unikátní.")
             with st.form("reg_form"):
                 r_email = st.text_input("Tvůj Email")
-                r_name = st.text_input("Jméno / Přezdívka")
+                r_name = st.text_input("Jméno / Přezdívka (bude vidět v žebříčku)")
                 r_pass = st.text_input("Heslo", type="password")
                 
                 if st.form_submit_button("Vytvořit účet"):
-                    exists = False
-                    for u in users:
-                        if str(u.get('Email')) == r_email:
-                            exists = True
-                            break
+                    email_clean = r_email.strip().lower()
+                    name_clean = r_name.strip().lower()
+                    email_exists = False
+                    name_exists = False
                     
-                    if exists:
-                        st.error("Tento email už existuje!")
-                    elif not r_email or not r_name or not r_pass:
-                        st.error("Vyplň všechna pole.")
+                    for u in users:
+                        if str(u.get('Email')).strip().lower() == email_clean: email_exists = True
+                        if str(u.get('Jmeno')).strip().lower() == name_clean: name_exists = True
+                    
+                    if email_exists: st.error("Tento email už existuje!")
+                    elif name_exists: st.error(f"Jméno '{r_name}' už někdo používá.")
+                    elif not r_email or not r_name or not r_pass: st.error("Vyplň všechna pole.")
                     else:
-                        # Ukládáme s prázdným týmem
-                        ws_users.append_row([r_email, r_name, r_pass, 0, 'user', ''])
-                        st.success("Účet vytvořen! Můžeš se přihlásit.")
-                        time.sleep(1)
-                        st.rerun()
+                        ws_users.append_row([r_email, r_name, r_pass, 0, 'user', '', '', '', '', '', '', 'NE'])
+                        st.session_state['logged_in'] = True
+                        st.session_state['user_email'] = r_email
+                        st.session_state['user_name'] = r_name
+                        st.session_state['user_role'] = 'user'
+                        st.session_state['user_team'] = ''
+                        st.success("Účet vytvořen! Vítej."); time.sleep(1); st.rerun()
+            st.markdown(contact_info)
 
     # --- APLIKACE (PŘIHLÁŠEN) ---
     else:
-        c1, c2, c3 = st.columns([2, 4, 1])
+        c1, c2, c3 = st.columns([3, 4, 1])
         c1.write(f"👤 **{st.session_state['user_name']}**")
-        c1.caption(f"Tým: {st.session_state.get('user_team') or '❌ (Zatím bez týmu)'}")
-        
+        c1.caption(f"Tým: {st.session_state.get('user_team') or '❌ (Bez týmu)'}")
         if c3.button("Odhlásit"):
-            st.session_state['logged_in'] = False
-            st.rerun()
-        
+            st.session_state['logged_in'] = False; st.rerun()
         st.divider()
 
-        # --- STATISTIKY ---
+        # VÝPOČTY
         match_points = {}
         exact_matches = {}
         matches_scored = {}
+        stats_basic = {}
+        stats_playoff = {}
+        
         zapas_map = {z['ID']: z for z in zapasy}
-        finished_matches_count = sum(1 for z in zapasy if str(z['Skore_Domaci']) != "")
+        finished_matches = [z for z in zapasy if str(z['Skore_Domaci']) != ""]
+        is_tournament_over = (len(finished_matches) == len(zapasy) and len(zapasy) > 0)
         
         for u in users: 
             email = str(u['Email'])
-            match_points[email] = 0
-            exact_matches[email] = 0
-            matches_scored[email] = 0
+            match_points[email] = 0; exact_matches[email] = 0; matches_scored[email] = 0
+            stats_basic[email] = 0; stats_playoff[email] = 0
             
+        tips_map = {}
         for t in tipy:
+            tips_map[(str(t['Email']), t['Zapas_ID'])] = t
             zid = t['Zapas_ID']
-            if zid in zapas_map:
+            email = str(t['Email'])
+            
+            if zid in zapas_map and str(zapas_map[zid]['Skore_Domaci']) != "":
                 z = zapas_map[zid]
-                faze = z.get('Faze', 'Skupina') 
+                faze = str(z.get('Faze', '')).lower()
                 p, ie, sa = spocitej_body_zapas(
                     t['Tip_Domaci'], t['Tip_Hoste'], 
                     z['Skore_Domaci'], z['Skore_Hoste'], 
                     z['Domaci'], z['Hoste'], faze
                 )
-                email = str(t['Email'])
-                match_points[email] += p
-                if ie: exact_matches[email] += 1
-                if sa: matches_scored[email] += 1
+                match_points[email] = match_points.get(email, 0) + p
+                if ie: exact_matches[email] = exact_matches.get(email, 0) + 1
+                if sa: matches_scored[email] = matches_scored.get(email, 0) + 1
+                
+                if "playoff" in faze or "finále" in faze or "o 3. místo" in faze:
+                    stats_playoff[email] += p
+                else:
+                    stats_basic[email] += p
+
+        # Bonus ostrostřelci (+6b)
+        max_exact = 0
+        if exact_matches: max_exact = max(exact_matches.values())
+        
+        bonus_ostrostrelci = {}
+        for email, count in exact_matches.items():
+            if is_tournament_over and count == max_exact and max_exact > 0:
+                bonus_ostrostrelci[email] = 6
+            else:
+                bonus_ostrostrelci[email] = 0
 
         long_term_points = {}
         for u in users:
-            b = spocitej_dlouhodobe_body(u, OFFICIAL_RESULTS)
-            long_term_points[str(u['Email'])] = b
+            email = str(u['Email'])
+            b_medals = spocitej_dlouhodobe_body(u, OFFICIAL_RESULTS)
+            b_sharp = bonus_ostrostrelci.get(email, 0)
+            long_term_points[email] = b_medals + b_sharp
         
-        max_exact_count = max(exact_matches.values()) if exact_matches else 0
-        exact_match_bonus = {e: (6 if c == max_exact_count and max_exact_count > 0 else 0) for e, c in exact_matches.items()}
-
         total_points = {e: match_points.get(e, 0) + long_term_points.get(e, 0) for e in match_points}
 
         # --- ZÁLOŽKY ---
         tabs = st.tabs([
-            "📜 Pravidla", "🏒 Zápasy", "🕵️ Přehled", "🏆 Medaile", "🥇 Žebříček", "🎯 Statistiky", "⚙️ Profil"
+            "🏒 Tipování", "🕵️ Přehled tipů", "🏆 Tipy na vítěze", "🥇 Žebříček", "🎯 Statistiky", "⚙️ Profil", "📜 Pravidla", "💰 Startovné, Bank a Výhry"
         ])
         
-        tab_rules, tab_matches, tab_all_tips, tab_long, tab_leaderboard, tab_stats, tab_profile = tabs
+        tab_matches, tab_all_tips, tab_long, tab_leaderboard, tab_stats, tab_profile, tab_rules, tab_bank = tabs
 
-        with tab_rules:
-            st.header("Pravidla")
-            st.markdown("""
-            * **Základ:** 7 bodů. Mínus rozdíl skóre. Min 2 body za vítěze.
-            * **Bonusy:** +2 za přesný výsledek, +2 za Česko.
-            * **Playoff:** Násobič 1.5x.
-            * **Dlouhodobé:** Vítěz 15b, Medaile 4b, Ostrostřelec +6b (na konci).
-            """)
-
+        # 1. TIPOVÁNÍ
         with tab_matches:
-            st.header("Tipování zápasů")
+            st.header("Tvoje tipy na zápasy")
+            st.caption("Tipni si přesný výsledek.")
             moje_tipy_dict = {t['Zapas_ID']: {'d': t['Tip_Domaci'], 'h': t['Tip_Hoste']} for t in tipy if str(t['Email']) == st.session_state['user_email']}
             
             with st.form("matches_form"):
+                st.form_submit_button("💾 Uložit všechny tipy (Nahoře)")
+                tips_to_save = {} 
+                
                 for z in zapasy:
                     zid = z['ID']
                     faze = z.get('Faze', 'Skupina')
@@ -263,196 +327,287 @@ def main():
                     try: d_str = parse_date(z['Datum']).strftime("%d.%m. %H:%M")
                     except: pass
                     
-                    if "playoff" in str(faze).lower(): st.markdown(f"🔥 **{z['Domaci']} - {z['Hoste']}** (PLAYOFF 1.5x)")
-                    else: st.write(f"**{z['Domaci']} - {z['Hoste']}**")
-                    st.caption(f"{d_str} | {faze}")
-                    
+                    st.markdown(f"**{z['Domaci']} - {z['Hoste']}** <span style='color:gray; font-size:0.8em'>({d_str} | {faze})</span>", unsafe_allow_html=True)
+                    if "playoff" in str(faze).lower(): st.caption("🔥 Playoff násobič 1.5x")
+
                     if str(z['Skore_Domaci']) != "":
                         mt = moje_tipy_dict.get(zid, {})
-                        p, _, _ = spocitej_body_zapas(mt.get('d'), mt.get('h'), z['Skore_Domaci'], z['Skore_Hoste'], z['Domaci'], z['Hoste'], faze)
-                        st.success(f"Výsledek: {z['Skore_Domaci']}:{z['Skore_Hoste']}")
-                        st.info(f"Tvůj tip: {mt.get('d','-')}:{mt.get('h','-')} ({p} b.)")
+                        p, is_exact, _ = spocitej_body_zapas(mt.get('d'), mt.get('h'), z['Skore_Domaci'], z['Skore_Hoste'], z['Domaci'], z['Hoste'], faze)
+                        msg = f"Výsledek: {z['Skore_Domaci']}:{z['Skore_Hoste']} | Tvůj tip: {mt.get('d','-')}:{mt.get('h','-')} | **{p} bodů**"
+                        if is_exact: msg += " ⭐"
+                        if p > 0: st.success(msg)
+                        else: st.error(msg)
                     else:
-                        c1, c2 = st.columns(2)
+                        c1, c2, _ = st.columns([1, 1, 4])
                         mt = moje_tipy_dict.get(zid, {})
-                        c1.number_input(z['Domaci'], value=mt.get('d', 0), min_value=0, key=f"md_{zid}")
-                        c2.number_input(z['Hoste'], value=mt.get('h', 0), min_value=0, key=f"mh_{zid}")
+                        val_d = c1.number_input("D", value=int(mt.get('d', 0)), min_value=0, key=f"md_{zid}", label_visibility="collapsed")
+                        val_h = c2.number_input("H", value=int(mt.get('h', 0)), min_value=0, key=f"mh_{zid}", label_visibility="collapsed")
+                        tips_to_save[zid] = (val_d, val_h)
                     st.divider()
-                
-                if st.form_submit_button("💾 Uložit tipy"):
-                    for z in zapasy:
-                        zid = z['ID']
-                        if str(z['Skore_Domaci']) == "":
-                            nd, nh = st.session_state[f"md_{zid}"], st.session_state[f"mh_{zid}"]
-                            found = False
-                            for i, row in enumerate(tipy):
-                                if str(row['Email']) == st.session_state['user_email'] and str(row['Zapas_ID']) == str(zid):
-                                    ws_tipy.update_cell(i + 2, 3, nd)
-                                    ws_tipy.update_cell(i + 2, 4, nh)
-                                    found = True; break
-                            if not found: ws_tipy.append_row([st.session_state['user_email'], zid, nd, nh])
-                    st.success("Uloženo!"); time.sleep(1); st.rerun()
 
+                if st.form_submit_button("💾 Uložit všechny tipy (Dole)"):
+                    with st.spinner("Ukládám tipy..."):
+                        save_tips_batch(ws_tipy, st.session_state['user_email'], tips_to_save, tipy)
+                    st.success("Tipy byly úspěšně uloženy!"); time.sleep(1); st.rerun()
+
+        # 2. PŘEHLED
         with tab_all_tips:
-            st.header("Přehled tipů")
-            fin = [z for z in zapasy if str(z['Skore_Domaci']) != ""]
-            if not fin: st.info("Žádné odehrané zápasy.")
+            st.header("Globální přehled tipů všech hráčů")
+            if not finished_matches:
+                st.info("Zatím nejsou žádné odehrané zápasy.")
             else:
-                tl = {(str(t['Email']), t['Zapas_ID']): f"{t['Tip_Domaci']}:{t['Tip_Hoste']}" for t in tipy}
-                od = []
-                for u in users:
-                    rd = {"Jméno": u['Jmeno']}
-                    for z in fin: rd[f"{z['Domaci']} vs {z['Hoste']}"] = tl.get((str(u['Email']), z['ID']), "-")
-                    od.append(rd)
-                st.dataframe(pd.DataFrame(od), use_container_width=True)
+                table_data = []
+                for z in finished_matches:
+                    row = {"Zápas": f"{z['Domaci']} - {z['Hoste']}", "Výsledek": f"{z['Skore_Domaci']}:{z['Skore_Hoste']}"}
+                    for u in users:
+                        email = str(u['Email'])
+                        t = tips_map.get((email, z['ID']))
+                        if t:
+                            p, is_exact, _ = spocitej_body_zapas(t['Tip_Domaci'], t['Tip_Hoste'], z['Skore_Domaci'], z['Skore_Hoste'], z['Domaci'], z['Hoste'], z.get('Faze',''))
+                            txt = f"{t['Tip_Domaci']}:{t['Tip_Hoste']} ({p}b)"
+                            if is_exact: txt = f"⭐ {txt}"
+                        else: txt = "-"
+                        row[u['Jmeno']] = txt
+                    table_data.append(row)
+                st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
 
+        # 3. DLOUHODOBÉ
         with tab_long:
-            st.header("Dlouhodobé sázky")
+            st.header("Tipy na vítěze a medailisty")
+            st.info("Tipni si vítěze a medailisty. Uzávěrka před začátkem turnaje!")
             lck = is_past_deadline(DEADLINE)
-            if lck: st.warning(f"Uzavřeno ({DEADLINE})")
+            if lck: st.warning(f"Sázky uzavřeny ({DEADLINE})")
             else: st.success(f"Otevřeno do {DEADLINE}")
             
-            ht = get_all_teams(zapasy) or ["Česko", "Kanada"]
+            ht = get_all_teams(zapasy)
             me_idx = next((i for i, u in enumerate(users) if str(u['Email']) == st.session_state['user_email']), None)
             mr = users[me_idx] if me_idx is not None else {}
             
             with st.form("lb"):
-                sw = st.selectbox("Vítěz", ht, index=ht.index(mr.get('Tip_Vitez')) if mr.get('Tip_Vitez') in ht else 0, disabled=lck)
+                sw = st.selectbox("Celkový Vítěz", ht, index=ht.index(mr.get('Tip_Vitez')) if mr.get('Tip_Vitez') in ht else 0, disabled=lck)
                 c1,c2,c3 = st.columns(3)
-                m1 = c1.selectbox("M1", ht, index=ht.index(mr.get('Tip_Med1')) if mr.get('Tip_Med1') in ht else 0, key="m1", disabled=lck)
-                m2 = c2.selectbox("M2", ht, index=ht.index(mr.get('Tip_Med2')) if mr.get('Tip_Med2') in ht else 1, key="m2", disabled=lck)
-                m3 = c3.selectbox("M3", ht, index=ht.index(mr.get('Tip_Med3')) if mr.get('Tip_Med3') in ht else 2, key="m3", disabled=lck)
-                if not lck and st.form_submit_button("💾 Uložit"):
+                m1 = c1.selectbox("Medaile 1", ht, index=ht.index(mr.get('Tip_Med1')) if mr.get('Tip_Med1') in ht else 0, key="m1", disabled=lck)
+                m2 = c2.selectbox("Medaile 2", ht, index=ht.index(mr.get('Tip_Med2')) if mr.get('Tip_Med2') in ht else 1, key="m2", disabled=lck)
+                m3 = c3.selectbox("Medaile 3", ht, index=ht.index(mr.get('Tip_Med3')) if mr.get('Tip_Med3') in ht else 2, key="m3", disabled=lck)
+                
+                if not lck and st.form_submit_button("💾 Uložit medaile"):
                     ws_users.update_cell(me_idx+2, 7, sw)
                     ws_users.update_cell(me_idx+2, 8, m1)
                     ws_users.update_cell(me_idx+2, 9, m2)
                     ws_users.update_cell(me_idx+2, 10, m3)
-                    st.success("OK"); st.rerun()
+                    st.success("Uloženo!"); st.rerun()
 
+        # 4. ŽEBŘÍČEK
         with tab_leaderboard:
-            st.header("Žebříček")
+            if OFFICIAL_RESULTS.get('winner'):
+                st.balloons()
+                st.success("🎉 **GRATULACE VÍTĚZŮM!** 🎉")
+                st.markdown("### 🏆 Sláva vítězům, čest poraženým! Ozvěte se na tipovacka.mibo@gmail.com pro výhru.")
+            
+            st.header("Celkové pořadí")
             rd = []
             for u in users:
                 e = str(u['Email'])
                 rd.append({
-                    "Jméno": u['Jmeno'], "Tým": u.get('Tym', '-'),
-                    "Zápasy": match_points.get(e,0), "Medaile": long_term_points.get(e,0),
+                    "Hráč": u['Jmeno'], "Tým": u.get('Tym', '-'),
+                    "Body Zápasy": match_points.get(e,0), "Body Bonusy": long_term_points.get(e,0),
                     "Celkem": total_points.get(e,0)
                 })
-            df = pd.DataFrame(rd)
-            at = sorted(list(set(df['Tým'].replace('', '-'))))
             
-            # --- TADY JE TA OPRAVENÁ PROMĚNNÁ ---
+            df = pd.DataFrame(rd).sort_values("Celkem", ascending=False).reset_index(drop=True)
+            df.index += 1
+            df.index.name = "Pořadí"
+            
+            if len(df) > 0:
+                s1 = df.iloc[0]['Celkem']; s2 = df.iloc[1]['Celkem'] if len(df) > 1 else 0; s3 = df.iloc[2]['Celkem'] if len(df) > 2 else 0
+                df['Ztráta na 1. místo'] = df['Celkem'].apply(lambda x: s1 - x if s1 > x else "")
+                df['Ztráta na 2. místo'] = df['Celkem'].apply(lambda x: s2 - x if s2 > x else "")
+                df['Ztráta na 3. místo'] = df['Celkem'].apply(lambda x: s3 - x if s3 > x else "")
+
+            at = sorted(list(set(df['Tým'].replace('', '-'))))
             vybrany_tym = st.selectbox("Filtr týmu", ["Všechny"] + at)
             if vybrany_tym != "Všechny": df = df[df['Tým'] == vybrany_tym]
-            # ------------------------------------
             
-            st.dataframe(df.sort_values("Celkem", ascending=False).reset_index(drop=True).set_index("Jméno"), use_container_width=True)
+            def highlight_top3(s):
+                if s.name == 1: return ['background-color: #FFD700; color: black'] * len(s)
+                elif s.name == 2: return ['background-color: #C0C0C0; color: black'] * len(s)
+                elif s.name == 3: return ['background-color: #CD7F32; color: black'] * len(s)
+                else: return [''] * len(s)
 
+            st.dataframe(df.style.apply(highlight_top3, axis=1), use_container_width=True)
+
+        # 5. STATISTIKY
         with tab_stats:
+            st.header("Statistiky")
             c1, c2 = st.columns(2)
             with c1:
-                st.subheader("Ostrostřelci")
-                st.dataframe(pd.DataFrame([{"Jméno": u['Jmeno'], "Trefy": exact_matches.get(str(u['Email']), 0)} for u in users]).sort_values("Trefy", ascending=False), use_container_width=True)
+                st.subheader("🎯 Nejvíc přesných tipů")
+                df_ex = pd.DataFrame([{"Jméno": u['Jmeno'], "Trefy": exact_matches.get(str(u['Email']), 0)} for u in users]).sort_values("Trefy", ascending=False)
+                st.dataframe(df_ex, use_container_width=True, hide_index=True)
             with c2:
-                st.subheader("Úspěšnost")
+                st.subheader("📊 Úspěšnost")
                 sd = []
                 for u in users:
                     sc = matches_scored.get(str(u['Email']), 0)
-                    perc = (sc/finished_matches_count*100) if finished_matches_count else 0
-                    sd.append({"Jméno": u['Jmeno'], "Úspěšnost": f"{perc:.0f}%", "_s": perc})
-                st.dataframe(pd.DataFrame(sd).sort_values("_s", ascending=False).drop(columns=["_s"]), use_container_width=True)
+                    perc = (sc/len(finished_matches)*100) if finished_matches else 0
+                    sd.append({"Jméno": u['Jmeno'], "Úspěšnost": f"{perc:.1f}%", "_s": perc})
+                st.dataframe(pd.DataFrame(sd).sort_values("_s", ascending=False).drop(columns=["_s"]), use_container_width=True, hide_index=True)
 
-        with tab_profile:
-            st.header("Nastavení profilu a týmu")
-            current_u_idx = next((i for i, u in enumerate(users) if str(u['Email']) == st.session_state['user_email']), None)
+            st.divider()
+            c3, c4 = st.columns(2)
+            with c3:
+                st.subheader("👑 Král Základní části")
+                sb = pd.DataFrame([{"Jméno": u['Jmeno'], "Body": stats_basic.get(str(u['Email']), 0)} for u in users]).sort_values("Body", ascending=False)
+                st.dataframe(sb, use_container_width=True, hide_index=True)
+            with c4:
+                st.subheader("🔥 Král Playoff")
+                sp = pd.DataFrame([{"Jméno": u['Jmeno'], "Body": stats_playoff.get(str(u['Email']), 0)} for u in users]).sort_values("Body", ascending=False)
+                st.dataframe(sp, use_container_width=True, hide_index=True)
+
+            st.divider()
+            st.subheader("🌐 Jak tipuje dav?")
+            all_winners = [u.get('Tip_Vitez') for u in users if u.get('Tip_Vitez')]
+            all_medals = [m for u in users for m in [u.get('Tip_Med1'), u.get('Tip_Med2'), u.get('Tip_Med3')] if m]
             
+            col_g1, col_g2 = st.columns(2)
+            with col_g1:
+                if all_winners:
+                    st.write("**Favorité na ZLATO**")
+                    win_counts = pd.Series(all_winners).value_counts().reset_index()
+                    win_counts.columns = ['Tým', 'Počet hlasů']
+                    win_counts.index += 1
+                    st.dataframe(win_counts, use_container_width=True)
+            with col_g2:
+                if all_medals:
+                    st.write("**Favorité na MEDAILE**")
+                    med_counts = pd.Series(all_medals).value_counts().reset_index()
+                    med_counts.columns = ['Tým', 'Počet hlasů']
+                    med_counts.index += 1
+                    st.dataframe(med_counts, use_container_width=True)
+
+        # 6. PROFIL
+        with tab_profile:
+            st.header("Můj profil")
+            current_u_idx = next((i for i, u in enumerate(users) if str(u['Email']) == st.session_state['user_email']), None)
             if current_u_idx is not None:
                 current_data = users[current_u_idx]
                 curr_team = current_data.get('Tym', '')
-                
-                # Získání seznamu všech existujících týmů (unikátní, neprázdné, seřazené)
                 all_existing_teams = sorted(list(set([u.get('Tym', '') for u in users if u.get('Tym', '') != ''])))
                 
                 with st.form("prof"):
-                    new_name = st.text_input("Tvé jméno", value=current_data['Jmeno'])
-                    st.divider()
-                    st.write("### 👥 Tvůj Tým")
-                    st.info(f"Aktuální tým: **{curr_team if curr_team else 'Žádný'}**")
+                    new_name = st.text_input("Změnit jméno", value=current_data['Jmeno'])
+                    st.write(f"Aktuální tým: **{curr_team if curr_team else 'Žádný'}**")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        sel = st.selectbox("Přidat se k týmu", ["- Vyber -"] + all_existing_teams)
+                        final_team = sel if sel != "- Vyber -" else curr_team
+                    with c2:
+                        new_t = st.text_input("Nebo založit nový")
+                        if new_t: final_team = new_t
                     
-                    team_mode = st.radio("Co chceš udělat?", ["Zůstat beze změny", "Přidat se k existujícímu týmu", "Založit nový tým"])
-                    
-                    final_team_name = curr_team 
-                    
-                    if team_mode == "Přidat se k existujícímu týmu":
-                        if not all_existing_teams:
-                            st.warning("Zatím nejsou žádné týmy.")
-                            final_team_name = curr_team
-                        else:
-                            try: def_idx = all_existing_teams.index(curr_team)
-                            except: def_idx = 0
-                            selected_existing = st.selectbox("Vyber tým ze seznamu", all_existing_teams, index=def_idx)
-                            final_team_name = selected_existing
-                            
-                    elif team_mode == "Založit nový tým":
-                        new_created_team = st.text_input("Název nového týmu (např. Irimon)")
-                        if new_created_team:
-                            final_team_name = new_created_team
-                    
-                    if st.form_submit_button("💾 Uložit změny"):
+                    if st.form_submit_button("💾 Uložit profil"):
                         ws_users.update_cell(current_u_idx+2, 2, new_name)
-                        ws_users.update_cell(current_u_idx+2, 6, final_team_name)
+                        ws_users.update_cell(current_u_idx+2, 6, final_team)
                         st.session_state['user_name'] = new_name
-                        st.session_state['user_team'] = final_team_name
-                        st.success("Profil aktualizován!")
-                        time.sleep(1)
-                        st.rerun()
+                        st.session_state['user_team'] = final_team
+                        st.success("Uloženo!"); time.sleep(1); st.rerun()
 
-        # --- ADMIN PANEL (UVNITŘ ELSE) ---
+        # 7. PRAVIDLA
+        with tab_rules:
+            st.header("Pravidla hry")
+            st.markdown("""
+            * **Zápasy do rozhodnutí:** Tipujeme výsledek po konci zápasu (včetně prodloužení/nájezdů), takže nejsou možné remízy.
+            * **Bodování:**
+                * Základ je **7 bodů**.
+                * Za každý rozdíl v gólech domácích a hostů se odečítá **1 bod**.
+                * Minimální počet bodů při správném určení vítěze jsou **2 body**.
+                * **+2 body** bonus za trefení přesného výsledku.
+                * **+2 body** bonus, pokud hraje Česko.
+            * **Playoff:** Všechny body se násobí **1.5x** (kromě českého bonusu).
+            * **Dlouhodobé sázky:**
+                * **15 bodů** za vítěze turnaje.
+                * **4 body** za každého trefeného medailistu.
+            * **Bonusy:**
+                * **+6 bodů** pro "Ostrostřelce" (hráč s nejvíce přesnými tipy na konci turnaje).
+            """)
+            st.caption("Made by MiBo | Kontakt: tipovacka.mibo@gmail.com")
+
+        # 8. STARTOVNÉ (QR KÓD)
+        with tab_bank:
+            st.header("💰 Startovné, Bank a Výhry")
+            me = next((u for u in users if str(u['Email']) == st.session_state['user_email']), None)
+            zaplaceno = str(me.get('Zaplaceno', 'NE')).upper() if me else 'NE'
+            
+            ENTRY_FEE = 150
+            total_paid = sum(1 for u in users if str(u.get('Zaplaceno','')).upper() == 'ANO')
+            bank_total = total_paid * ENTRY_FEE
+            
+            if zaplaceno == 'ANO': st.success("✅ Tvé startovné je ZAPLACENO.")
+            else: st.warning("❌ Startovné zatím NENÍ uhrazeno.")
+            
+            st.divider()
+            c1, c2 = st.columns(2)
+            with c1:
+                st.subheader("Platební údaje")
+                st.write("**Číslo účtu:** 1596874001/2700")
+                st.write(f"**Částka:** {ENTRY_FEE} Kč")
+                st.write("**Poznámka pro příjemce:** Tvoje jméno/přezdívka v soutěži")
+                # QR KÓD - Musí být nahrán na GitHubu jako 'qr_platba.jpeg'
+                st.image("qr_platba.jpeg", caption="QR Platba", width=250)
+                
+            with c2:
+                st.subheader("Aktuální výše výher")
+                st.write(f"🥇 **1. Místo:** {int(bank_total * 0.6)} Kč")
+                st.write(f"🥈 **2. Místo:** {int(bank_total * 0.2)} Kč")
+                st.write(f"🥉 **3. Místo:** {int(bank_total * 0.1)} Kč")
+
+        # --- ADMIN ---
         if st.session_state.get('user_role') == 'admin':
             with st.sidebar:
-                st.header("Admin")
+                st.header("Admin Panel")
                 with st.expander("Výsledky zápasů"):
-                    # Změna: V seznamu ukazujeme ID i Týmy
                     z_names = [f"{z['ID']}: {z['Domaci']} vs {z['Hoste']}" for z in zapasy]
                     sel_z = st.selectbox("Vyber zápas", z_names)
-                    
-                    # Z textu "1: Česko vs Kanada" si vytáhneme jen to ID před dvojtečkou
                     sid = int(sel_z.split(":")[0])
-                    
-                    with st.form("as"):
-                        st.write(f"Zadáváš výsledek pro: **{sel_z}**")
+                    with st.form("admin_score"):
                         c1, c2 = st.columns(2)
-                        d = c1.text_input("Góly Domácí")
-                        h = c2.text_input("Góly Hosté")
-                        
-                        if st.form_submit_button("Uložit výsledek"):
-                            try:
-                                cell = ws_zapasy.find(str(sid))
-                                ws_zapasy.update_cell(cell.row, 5, d)
-                                ws_zapasy.update_cell(cell.row, 6, h)
-                                st.success(f"Uloženo: {d}:{h}")
-                            except Exception as e:
-                                st.error(f"Chyba při ukládání: {e}")
+                        d = c1.text_input("Góly D"); h = c2.text_input("Góly H")
+                        if st.form_submit_button("Uložit"):
+                            cell = ws_zapasy.find(str(sid))
+                            ws_zapasy.update_cell(cell.row, 5, d); ws_zapasy.update_cell(cell.row, 6, h)
+                            st.success("OK"); st.rerun()
 
-                with st.expander("Konec turnaje (Admin)"):
+                with st.expander("Konec turnaje (Medailisté)"):
                     with st.form("af"):
-                        st.info("Vyplň přesné názvy týmů (např. 'Česko').")
-                        w = st.text_input("Celkový Vítěz", value=config.get('vitez_turnaje', ''))
-                        m1 = st.text_input("Medaile 1", value=config.get('med_1', ''))
-                        m2 = st.text_input("Medaile 2", value=config.get('med_2', ''))
-                        m3 = st.text_input("Medaile 3", value=config.get('med_3', ''))
+                        # Selectboxy pro admina
+                        ht = get_all_teams(zapasy)
+                        # Pokud už je něco v configu, najdeme index, jinak 0
+                        def get_idx(val): 
+                            return ht.index(val) if val in ht else 0
+
+                        w = st.selectbox("Vítěz", ht, index=get_idx(config.get('vitez_turnaje', '')))
+                        m1 = st.selectbox("Medaile 1", ht, index=get_idx(config.get('med_1', '')))
+                        m2 = st.selectbox("Medaile 2", ht, index=get_idx(config.get('med_2', '')))
+                        m3 = st.selectbox("Medaile 3", ht, index=get_idx(config.get('med_3', '')))
                         
                         if st.form_submit_button("Uzavřít turnaj"):
                             def upd(k, v):
-                                cell = ws_nastaveni.find(k)
-                                if cell: ws_nastaveni.update_cell(cell.row, 2, v)
+                                c = ws_nastaveni.find(k)
+                                if c: ws_nastaveni.update_cell(c.row, 2, v)
                                 else: ws_nastaveni.append_row([k, v])
-                            upd('vitez_turnaje', w)
-                            upd('med_1', m1)
-                            upd('med_2', m2)
-                            upd('med_3', m3)
-                            st.success("Turnaj uzavřen, body přičteny!")
+                            upd('vitez_turnaje', w); upd('med_1', m1); upd('med_2', m2); upd('med_3', m3)
+                            st.success("Turnaj uzavřen!"); st.rerun()
+                
+                with st.expander("Platby"):
+                    users_list = [f"{u['Jmeno']} ({u['Email']})" for u in users]
+                    sel_user_pay = st.selectbox("Vyber uživatele", users_list)
+                    sel_email = sel_user_pay.split(" (")[-1].replace(")", "")
+                    u_idx = next((i for i, u in enumerate(users) if str(u['Email']) == sel_email), 0)
+                    curr = str(users[u_idx].get('Zaplaceno', 'NE'))
+                    new_s = st.radio("Stav", ["ANO", "NE"], index=0 if curr=="ANO" else 1)
+                    if st.button("Změnit stav"):
+                        ws_users.update_cell(u_idx+2, 12, new_s)
+                        st.success("Změněno"); st.rerun()
 
 if __name__ == "__main__":
     main()
