@@ -328,22 +328,44 @@ def main():
         if c3.button("Odhlásit"): st.session_state['logged_in'] = False; st.rerun()
         st.divider()
 
-        # --- NOVINKA: NEJBLIŽŠÍ ZÁPAS (Decentní) ---
+        # --- NOVINKA: NEJBLIŽŠÍ ZÁPAS (S OPRAVOU ČASOVÝCH PÁSEM) ---
+        import pytz # Import pro práci s časovými zónami
+        
         upcoming_match = None
-        now = datetime.now()
+        
+        # 1. Definujeme Pražskou zónu a aktuální čas v ní
+        prague_tz = pytz.timezone('Europe/Prague')
+        now_prague = datetime.now(prague_tz)
+        
+        match_dt_aware = None
+
         for z in zapasy:
             if str(z['Skore_Domaci']) == "":
-                # Používáme předpočítaný Datum_Obj
-                match_dt = z.get('Datum_Obj')
-                if match_dt and match_dt > now:
-                    upcoming_match = z; break
+                # Získáme naivní datum z Excelu
+                match_dt_naive = z.get('Datum_Obj')
+                
+                if match_dt_naive:
+                    # 2. Řekneme Pythonu: "Tento čas z Excelu je v Pražském pásmu"
+                    try:
+                        match_dt_aware_temp = prague_tz.localize(match_dt_naive)
+                    except ValueError:
+                        # Pojistka, kdyby datum už zónu mělo
+                        match_dt_aware_temp = match_dt_naive.replace(tzinfo=prague_tz)
+                    
+                    # 3. Porovnáváme dva časy ve stejné zóně (Praha vs Praha)
+                    if match_dt_aware_temp > now_prague:
+                        upcoming_match = z
+                        match_dt_aware = match_dt_aware_temp
+                        break
         
-        if upcoming_match:
-            mdt = upcoming_match['Datum_Obj']
-            delta = mdt - now
-            hours, remainder = divmod(delta.seconds, 3600); minutes, _ = divmod(remainder, 60)
+        if upcoming_match and match_dt_aware:
+            # 4. Výpočet rozdílu
+            delta = match_dt_aware - now_prague
             
-            # Dav
+            hours, remainder = divmod(delta.seconds, 3600)
+            minutes, _ = divmod(remainder, 60)
+            
+            # Dav - výpočet procent
             tips_d, tips_h = 0, 0
             for t in tipy:
                 if t['Zapas_ID'] == upcoming_match['ID']:
@@ -437,8 +459,8 @@ def main():
                 df_rank.at[idx, 'Vývoj pořadí'] = "🆕"
 
         # ZÁLOŽKY
-        tabs = st.tabs(["🏒 Tipování", "🕵️ Přehled", "🏆 Medaile", "🥇 Žebříček", "🎯 Statistiky", "⚙️ Profil", "📜 Pravidla", "💰 Startovné a výhry"])
-        t_matches, t_overview, t_long, t_rank, t_stats, t_prof, t_rules, t_bank = tabs
+        tabs = st.tabs(["🏒 Tipování", "🕵️ Přehled", "🏆 Medaile", "🥇 Žebříček", "🎯 Statistiky", "⚙️ Profil", "📜 Pravidla", "🏛️ Historické výsledky", "💰 Startovné a výhry"])
+        t_matches, t_overview, t_long, t_rank, t_stats, t_prof, t_rules, t_history, t_bank = tabs
 
         # 1. TIPOVÁNÍ
         with t_matches:
@@ -580,14 +602,92 @@ def main():
             
         # 5. STATISTIKY
         with t_stats:
-            st.header("Statistiky")
+            st.header("Statistika nuda je, má však cenné údaje")
+            
+            # --- 1. ŠŤASTNÁ RUKA & ZABIJÁK TIKETŮ (TABULKA) ---
+            st.subheader("🍀 Šťastná ruka & 💀 Zabiják tiketů")
+            st.caption("Zápasy s nejvyšším a nejnižším průměrem bodů na hráče.")
+
+            if finished_matches:
+                # Příprava dat
+                tips_by_match = {}
+                for t in tipy:
+                    tips_by_match.setdefault(t['Zapas_ID'], []).append(t)
+
+                match_stats = []
+                for z in finished_matches:
+                    tips_for_z = tips_by_match.get(z['ID'], [])
+                    if not tips_for_z: continue
+                    
+                    total_pts = 0; count = 0
+                    faze_lower = str(z.get('Faze', '')).lower()
+                    is_playoff = any(x in faze_lower for x in ["playoff", "finále", "o 3. místo", "čtvrtfinále", "semifinále"])
+
+                    for t in tips_for_z:
+                        p, _, _ = spocitej_body_zapas(t['Tip_Domaci'], t['Tip_Hoste'], z['Skore_Domaci'], z['Skore_Hoste'], z['Domaci'], z['Hoste'], z.get('Faze',''))
+                        total_pts += p; count += 1
+                    
+                    if count > 0:
+                        match_stats.append({
+                            'Zápas': f"{z['Domaci']} - {z['Hoste']}",
+                            'Skóre': f"{z['Skore_Domaci']}:{z['Skore_Hoste']}",
+                            'Průměr': total_pts / count,
+                            'Fáze': 'Playoff' if is_playoff else 'Základní část'
+                        })
+
+                if match_stats:
+                    df_stats = pd.DataFrame(match_stats)
+                    summary_rows = []
+
+                    # Pomocná funkce pro výběr min/max
+                    def add_extremes(subset, label_prefix):
+                        if subset.empty: return
+                        best = subset.loc[subset['Průměr'].idxmax()]
+                        worst = subset.loc[subset['Průměr'].idxmin()]
+                        
+                        summary_rows.append({
+                            "Fáze": label_prefix,
+                            "Kategorie": "Nejvyšší bodový průměr na zápas",
+                            "Zápas": best['Zápas'],
+                            "Výsledek": best['Skóre'],
+                            "Průměr bodů": f"{best['Průměr']:.2f}"
+                        })
+                        summary_rows.append({
+                            "Fáze": label_prefix,
+                            "Kategorie": "Nejnižší bodový průměr na zápas",
+                            "Zápas": worst['Zápas'],
+                            "Výsledek": worst['Skóre'],
+                            "Průměr bodů": f"{worst['Průměr']:.2f}"
+                        })
+
+                    # 1. Základní část
+                    add_extremes(df_stats[df_stats['Fáze'] == 'Základní část'], "Základní část")
+                    
+                    # 2. Playoff
+                    add_extremes(df_stats[df_stats['Fáze'] == 'Playoff'], "Playoff (x1.5)")
+
+                    if summary_rows:
+                        df_summary = pd.DataFrame(summary_rows)
+                        # Stylování tabulky na střed
+                        st.dataframe(
+                            df_summary.style.set_properties(**{'text-align': 'center'})
+                            .set_table_styles([dict(selector='th', props=[('text-align', 'center')])]),
+                            use_container_width=True, 
+                            hide_index=True
+                        )
+            else:
+                st.info("Zatím nejsou k dispozici data z odehraných zápasů.")
+
+            st.divider()
+
+            # --- 2. KLASICKÉ STATISTIKY (PŮVODNÍ) ---
             c1, c2 = st.columns(2)
             with c1:
                 st.subheader("🎯 Nejvíc přesných tipů")
                 df_ex = pd.DataFrame([{"Jméno": u['Jmeno'], "Trefy": exact_matches.get(str(u['Email']), 0)} for u in users]).sort_values("Trefy", ascending=False)
                 st.dataframe(df_ex.style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
             with c2:
-                st.subheader("📊 Úspěšnost")
+                st.subheader("📊 Úspěšnost tipů")
                 sd = []
                 for u in users:
                     sc = matches_scored.get(str(u['Email']), 0)
@@ -684,7 +784,42 @@ def main():
             """)
             st.caption("Made by MiBo | Kontakt: tipovacka.mibo@gmail.com")
 
-        # 8. STARTOVNÉ
+        # 8. HISTORIE (Nová sekce)
+        with t_history:
+            st.header("Síň slávy - Historické výsledky")
+            st.markdown("Přehled vítězů a medailistů z minulých turnajů.")
+            
+            # Data zadána ručně
+            history_data = [
+                {"Rok": 2025, "Turnaj": "MS - Švédsko/Dánsko", "🥇 1. Místo": "Brácha Tyrdy", "🥈 2. Místo": "Lukáš", "🥉 3. Místo": "Antonín"},
+                {"Rok": 2024, "Turnaj": "MS - Česko", "🥇 1. Místo": "Luděk / Příbor", "🥈 2. Místo": "-", "🥉 3. Místo": "Tony"},
+                {"Rok": 2023, "Turnaj": "MS - Finsko/Lotyšsko", "🥇 1. Místo": "Tyrda", "🥈 2. Místo": "MiBo", "🥉 3. Místo": "Honza K."},
+                {"Rok": 2022, "Turnaj": "MS - Finsko", "🥇 1. Místo": "Lukáš", "🥈 2. Místo": "Tonda", "🥉 3. Místo": "MiBo"},
+                {"Rok": 2022, "Turnaj": "ZOH - Čína", "🥇 1. Místo": "Kedárek", "🥈 2. Místo": "MiBo", "🥉 3. Místo": "Kedar"},
+                {"Rok": 2021, "Turnaj": "MS - Lotyšsko", "🥇 1. Místo": "Honza Geryk", "🥈 2. Místo": "Peťa údržbář", "🥉 3. Místo": "Janča"},
+                {"Rok": 2019, "Turnaj": "MS - Slovensko", "🥇 1. Místo": "Lukáš", "🥈 2. Místo": "MiBo", "🥉 3. Místo": "Honza K."},
+                {"Rok": 2018, "Turnaj": "MS - Dánsko", "🥇 1. Místo": "Dominik", "🥈 2. Místo": "Lukáš", "🥉 3. Místo": "Tonda"},
+                {"Rok": 2017, "Turnaj": "MS - Němesko/Francie", "🥇 1. Místo": "Lukáš", "🥈 2. Místo": "Tonda", "🥉 3. Místo": "MiBo"},
+                {"Rok": 2016, "Turnaj": "MS - Rusko", "🥇 1. Místo": "Vlasta", "🥈 2. Místo": "Kuba H.", "🥉 3. Místo": "MiBo"},
+            ]
+            
+            df_hist = pd.DataFrame(history_data)
+            
+            # Stylování tabulky
+            st.dataframe(
+                df_hist.style.set_properties(**{'text-align': 'center'})
+                .set_table_styles([dict(selector='th', props=[('text-align', 'center')])]),
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # Malý vtípek na závěr (jen pro MiBa)
+            me_email = st.session_state.get('user_email', '')
+            # Pokud jsi to ty (předpokládám tvůj email obsahuje mibo), zobrazí se povzbuzení
+            if "mibo" in me_email.lower():
+                 st.info("💡 **Zajímavost:** Hráč **MiBo** má na kontě neuvěřitelných 6 medailí (3x🥈, 3x🥉), ale zlato mu stále uniká. Zlomí to letos? 🍀")    
+
+        # 9. STARTOVNÉ
         with t_bank:
             st.header("Startovné, Bank a Výhry")
             me = next((u for u in users if str(u['Email']) == st.session_state['user_email']), None)
