@@ -300,14 +300,21 @@ def main():
                 st.info("Bohužel už není možné se automaticky zaregistrovat. Pokud máš pocit, že se jedná o chybu, nebo máš protekci, napiš na **tipovacka.mibo@gmail.com**.")
             else:
                 with st.form("reg_form"):
-                    r_email = st.text_input("Email"); r_name = st.text_input("Jméno"); r_pass = st.text_input("Heslo", type="password")
+                    r_email = st.text_input("Email")
+                    r_name = st.text_input("Jméno")
+                    r_pass = st.text_input("Heslo", type="password")
+                    r_pass2 = st.text_input("Kontrola hesla", type="password") # NOVÉ: Kontrola
+                    
                     if st.form_submit_button("Vytvořit účet"):
-                        email_clean = r_email.strip().lower(); name_clean = r_name.strip().lower()
+                        email_clean = r_email.strip().lower()
+                        name_clean = r_name.strip().lower()
                         email_exists = any(str(u.get('Email')).strip().lower() == email_clean for u in users)
                         name_exists = any(str(u.get('Jmeno')).strip().lower() == name_clean for u in users)
+                        
                         if email_exists: st.error("Tento email už existuje!")
                         elif name_exists: st.error(f"Jméno '{r_name}' už někdo používá.")
                         elif not r_email or not r_name or not r_pass: st.error("Vyplň všechna pole.")
+                        elif r_pass != r_pass2: st.error("Hesla se neshodují!") # NOVÉ: Validace
                         else:
                             hashed_pw = make_hash(r_pass)
                             # Default role 'user'
@@ -315,7 +322,7 @@ def main():
                             st.cache_data.clear()
                             st.success("Registrace úspěšná! Přihlašuji...")
                             
-                            # AUTO LOGIN LOGIKA
+                            # NOVÉ: Auto Login - okamžité nastavení session
                             st.session_state['logged_in'] = True
                             st.session_state['user_email'] = r_email
                             st.session_state['user_name'] = r_name
@@ -679,13 +686,18 @@ def main():
         with t_prof:
             st.header("Můj profil")
             current_u_idx = next((i for i, u in enumerate(users) if str(u['Email']) == st.session_state['user_email']), None)
+            
             if current_u_idx is not None:
                 current_data = users[current_u_idx]
                 curr_team = current_data.get('Tym', '')
                 all_existing_teams = sorted(list(set([u.get('Tym', '') for u in users if u.get('Tym', '') != ''])))
+                
+                # A. ZMĚNA ÚDAJŮ
                 with st.form("prof"):
+                    st.subheader("Osobní údaje")
                     new_name = st.text_input("Změnit jméno", value=current_data['Jmeno'])
                     st.write(f"Aktuální tým: **{curr_team if curr_team else 'Žádný'}**")
+                    
                     c1, c2 = st.columns(2)
                     with c1:
                         sel = st.selectbox("Přidat se k týmu", ["- Vyber -"] + all_existing_teams)
@@ -693,7 +705,8 @@ def main():
                     with c2:
                         new_t = st.text_input("Nebo založit nový")
                         if new_t: final_team = new_t
-                    if st.form_submit_button("💾 Uložit profil"):
+                        
+                    if st.form_submit_button("💾 Uložit údaje"):
                         row_idx = current_u_idx + 2
                         updates = [gspread.Cell(row_idx, 2, new_name), gspread.Cell(row_idx, 6, final_team)]
                         try:
@@ -702,6 +715,31 @@ def main():
                             st.session_state['user_team'] = final_team
                             st.cache_data.clear(); st.success("Profil aktualizován!"); time.sleep(1); st.rerun()
                         except Exception as e: st.error(f"Chyba při ukládání: {e}")
+
+                st.divider()
+
+                # B. ZMĚNA HESLA (NOVÉ)
+                with st.form("pass_change"):
+                    st.subheader("Změna hesla")
+                    p_old = st.text_input("Staré heslo", type="password")
+                    p_new = st.text_input("Nové heslo", type="password")
+                    p_new2 = st.text_input("Kontrola nového hesla", type="password")
+                    
+                    if st.form_submit_button("🔐 Změnit heslo"):
+                        # Ověření starého hesla
+                        if check_password(p_old, current_data['Heslo']):
+                            if p_new == p_new2:
+                                if len(p_new) > 0:
+                                    new_hash = make_hash(p_new)
+                                    ws_users.update_cell(current_u_idx + 2, 3, new_hash) # Sloupec 3 je Heslo
+                                    st.cache_data.clear()
+                                    st.success("Heslo úspěšně změněno!")
+                                else:
+                                    st.error("Heslo nesmí být prázdné.")
+                            else:
+                                st.error("Nová hesla se neshodují.")
+                        else:
+                            st.error("Staré heslo není správné.")
 
         # 7. PRAVIDLA
         with t_rules:
@@ -752,7 +790,7 @@ def main():
                 history_football = [
                     {"Rok": 2024, "Turnaj": "EURO - Německo", "🥇 1. Místo": "Brácha Tyrdy", "🥈 2. Místo": "Antonín", "🥉 3. Místo": "Tyrda"},
                     {"Rok": 2022, "Turnaj": "MS - Katar", "🥇 1. Místo": "Tony", "🥈 2. Místo": "Lukáč", "🥉 3. Místo": "MiBo"},
-                    {"Rok": 2021, "Turnaj": "EURO", "🥇 1. Místo": "Dominik", "🥈 2. Místo": "Kedar", "🥉 3. Místo": "Tony B."},
+                    {"Rok": 2021, "Turnaj": "EURO - 11 zemí", "🥇 1. Místo": "Dominik", "🥈 2. Místo": "Kedar", "🥉 3. Místo": "Tony B."},
                     {"Rok": 2016, "Turnaj": "EURO - Francie", "🥇 1. Místo": "Vojta H.", "🥈 2. Místo": "Ondra T.", "🥉 3. Místo": "Luděk"},
                 ]
                 df_hist_f = pd.DataFrame(history_football)
@@ -808,7 +846,7 @@ def main():
                             ws_zapasy.update_cell(cell.row, 5, d); ws_zapasy.update_cell(cell.row, 6, h)
                             st.cache_data.clear(); st.success("OK"); st.rerun()
 
-                # 2. SPRÁVA TURNAJE (Vidí POUZE Admin)
+                # 2. SPRÁVA TURNAJE A UŽIVATELŮ (Vidí POUZE Admin)
                 if user_role == 'admin':
                     with st.expander("Konec turnaje"):
                         with st.form("af"):
@@ -835,6 +873,24 @@ def main():
                         new_s = st.radio("Stav", ["ANO", "NE"], index=0 if curr=="ANO" else 1)
                         if st.button("Změnit stav"):
                             ws_users.update_cell(u_idx+2, 12, new_s); st.cache_data.clear(); st.success("Změněno"); st.rerun()
+
+                    # NOVÉ: RESET HESLA
+                    with st.expander("Správa uživatelů (Reset hesla)"):
+                        st.caption("Resetuje heslo vybraného uživatele na: **tipovacka**")
+                        users_list_reset = [f"{u['Jmeno']} ({u['Email']})" for u in users]
+                        sel_user_reset = st.selectbox("Vyber uživatele pro reset", users_list_reset)
+                        
+                        if st.button("♻️ Resetovat heslo"):
+                            sel_email_r = sel_user_reset.split(" (")[-1].replace(")", "")
+                            u_idx_r = next((i for i, u in enumerate(users) if str(u['Email']) == sel_email_r), 0)
+                            
+                            # Vygenerujeme hash pro defaultní heslo
+                            default_pw_hash = make_hash("tipovacka")
+                            
+                            # Uložíme do DB (sloupec 3 = Heslo)
+                            ws_users.update_cell(u_idx_r + 2, 3, default_pw_hash)
+                            st.cache_data.clear()
+                            st.success(f"Heslo pro {sel_email_r} resetováno na 'tipovacka'.")
 
     # PATIČKA
     st.markdown('<div class="footer-warning">⚠️ <b>Tip:</b> Pro pohyb v aplikaci používej záložky. Tlačítko Zpět nebo Refresh (F5) tě může odhlásit.</div>', unsafe_allow_html=True)
