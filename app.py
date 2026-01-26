@@ -204,6 +204,7 @@ def save_tips_batch(ws_tipy, user_email, tips_to_save, existing_tips):
 
 # --- LOGIKA BODŮ ---
 def spocitej_body_zapas(tip_d, tip_h, real_d, real_h, team_d, team_h, faze, tip_ot="", real_ot=""):
+    # 0. Ošetření vstupů
     if str(real_d) == "" or str(real_h) == "": return 0, False, False, 0
     try:
         tip_d, tip_h = int(tip_d), int(tip_h)
@@ -214,19 +215,22 @@ def spocitej_body_zapas(tip_d, tip_h, real_d, real_h, team_d, team_h, faze, tip_
     ot_points = 0
     is_exact = False
     
-    # 1. Základní body
+    # 1. Základní body (Vítěz a skóre)
     winner_real = 1 if real_d > real_h else 2
     winner_tip = 1 if tip_d > tip_h else (2 if tip_h > tip_d else 0)
     
     if winner_real == winner_tip:
         diff = abs(real_d - tip_d) + abs(real_h - tip_h)
+        # ZÁCHRANNÁ BRZDA: Pokud trefil vítěze, má min. 2 body.
+        # Příklad: 1:0 vs 10:0 -> diff 9 -> 7-9=-2 -> max(2, -2) = 2 body.
         base_points += max(2, 7 - diff)
+        
         if tip_d == real_d and tip_h == real_h:
             base_points += 2
             is_exact = True
 
-    # Multiplikátor Playoff (pouze na základní body)
-    if "playoff" in str(faze).lower():
+    # Multiplikátor Playoff
+    if "playoff" in str(faze).lower() or "finále" in str(faze).lower() or "o 3." in str(faze).lower() or "čtvrt" in str(faze).lower() or "semi" in str(faze).lower():
         base_points = math.ceil(base_points * 1.5)
 
     # Bonus Česko
@@ -235,18 +239,22 @@ def spocitej_body_zapas(tip_d, tip_h, real_d, real_h, team_d, team_h, faze, tip_
         base_points += 2
 
     # 2. Bonus za Prodloužení (+1 / -1)
-    # Počítá se jen pokud byl rozdíl gólů v tipu 1 a uživatel zaškrtnul OT
+    # Podmínka: Tipnutý rozdíl je 1 gól A je vyplněno prodloužení
     if abs(tip_d - tip_h) == 1 and str(tip_ot).strip() != "":
-        user_predicted_ot = True
+        user_predicted_ot = (str(tip_ot).strip().upper() == "ANO")
         match_was_ot = (str(real_ot).strip().upper() == "ANO")
         
         if user_predicted_ot:
             if match_was_ot:
-                ot_points += 1  # Trefil remízu po 60 min
+                ot_points = 1   # Trefil -> +1
             else:
-                ot_points -= 1  # Netrefil
+                ot_points = -1  # Netrefil -> -1 (odečte se od základu)
     
     total_points = base_points + ot_points
+    
+    # Pojistka proti záporným bodům (volitelné)
+    if total_points < 0: total_points = 0
+    
     return total_points, is_exact, (total_points > 0 or ot_points != 0), ot_points
 
 def spocitej_dlouhodobe_body(user_row, official_results):
@@ -1158,7 +1166,7 @@ def main():
                         # Nové pole pro Prodloužení (čte sloupec H ze sheetu, což je index 8, nebo klíč 'Prodlouzeni')
                         curr_ot = str(curr_z.get('Prodlouzeni', 'NE')).upper()
                         # Pokud je prázdné, default NE
-                        ot_val = c3.selectbox("Prodloužení?", ["NE", "ANO"], index=1 if curr_ot == "ANO" else 0)
+                        ot_val = c3.selectbox("Prodloužení?", ["NE", "ANO"], index=1 if curr_ot == "ANO" else 0, key=f"admin_ot_{sid}")
 
                         if st.form_submit_button("Uložit"):
                             try:
