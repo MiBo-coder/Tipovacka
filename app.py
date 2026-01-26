@@ -10,7 +10,7 @@ import hashlib
 import pytz
 
 # --- KONFIGURACE A KONSTANTY ---
-st.set_page_config(page_title="Tipovačka hokej - Olympiáda 2026", layout="wide")
+st.set_page_config(page_title="Tipovačka hokej - Olympiáda 2026", layout="wide", page_icon="🏒")
 
 # Limit hráčů pro registraci přes formulář
 MAX_PLAYERS = 40
@@ -896,4 +896,5 @@ def main():
     st.markdown('<div class="footer-warning">⚠️ <b>Tip:</b> Pro pohyb v aplikaci používej záložky. Tlačítko Zpět nebo Refresh (F5) tě může odhlásit.</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
+
     main()
