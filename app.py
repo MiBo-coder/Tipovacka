@@ -335,8 +335,7 @@ def main():
                         if not u.empty and check_password(password, u.iloc[0]['Heslo']):
                             st.session_state['logged_in'] = True; st.session_state['user_email'] = str(u.iloc[0]['Email']); st.session_state['user_name'] = u.iloc[0]['Jmeno']; st.session_state['user_team'] = u.iloc[0].get('Tym', ''); st.session_state['user_role'] = u.iloc[0]['Role']; st.rerun()
                         else: st.error("Chyba přihlášení. Zkontroluj email a heslo.")
-            
-            st.divider()
+
             
             # --- SEKCE RESET HESLA (To, co jsme přidali minule) ---
             with st.expander("🆘 Zapomněl jsi heslo?"):
@@ -618,7 +617,7 @@ def main():
         # 1. TIPOVÁNÍ
         with t_matches:
             st.header("Tvoje tipy na jednotlivé zápasy")
-            moje_tipy_dict = {t['Zapas_ID']: {'d': t['Tip_Domaci'], 'h': t['Tip_Hoste']} for t in tipy if str(t['Email']) == st.session_state['user_email']}
+            moje_tipy_dict = {str(t['Zapas_ID']): t for t in tipy if str(t['Email']) == st.session_state['user_email']}
             with st.form("tips_form"):
                 tips_to_save = {} 
                 for z in zapasy:
@@ -627,8 +626,22 @@ def main():
                     d_str = d_obj.strftime("%d.%m. %H:%M") if d_obj else z['Datum']
                     label = f"{get_team_label(z['Domaci'])} - {get_team_label(z['Hoste'])}"
                     st.markdown(f"**{label}** <small>({d_str})</small>", unsafe_allow_html=True)
-                    if str(z['Skore_Domaci']) != "":
-                        mt = moje_tipy_dict.get(zid, {})
+                    
+                    # --- OPRAVA: Definice mt MUSÍ být hned zde ---
+                    mt = moje_tipy_dict.get(str(zid), {})
+                    
+                    # LOGIKA ZAMČENÍ ZÁPASU ČASEM
+                    prague_tz = pytz.timezone('Europe/Prague')
+                    now_prague = datetime.now(prague_tz)
+                    match_dt = z.get('Datum_Obj')
+                    if match_dt and match_dt.tzinfo is None:
+                        match_dt = prague_tz.localize(match_dt)
+                        
+                    is_locked = (match_dt and now_prague > match_dt)
+                    is_played = (str(z['Skore_Domaci']) != "")
+
+                    # Zobrazíme výsledek, pokud je dohráno NEBO pokud zápas už začal (je zamčený)
+                    if is_played or is_locked:
                         # Voláme novou spocitej_body_zapas
                         p, ie, _, ot_p = spocitej_body_zapas(
                             mt.get('Tip_Domaci'), mt.get('Tip_Hoste'), 
@@ -640,10 +653,10 @@ def main():
                         st.info(f"Výsledek: {z['Skore_Domaci']}:{z['Skore_Hoste']} | Tvůj tip: {mt.get('Tip_Domaci','-')}:{mt.get('Tip_Hoste','-')} | **{p}b** {ot_txt}")
                     else:
                         c1, c2, c3 = st.columns([1,1,3])
-                        # Načtení starých hodnot
+                        # Načtení starých hodnot (TEĎ UŽ TO BUDE FUNGOVAT)
                         old_d = mt.get('Tip_Domaci', 0)
                         old_h = mt.get('Tip_Hoste', 0)
-                        old_ot = mt.get('Tip_Prodlouzeni', '') # Načtení z DB (sloupec E)
+                        old_ot = mt.get('Tip_Prodlouzeni', '') 
                         
                         # Inputy
                         v_d = c1.number_input("D", value=int(old_d) if old_d != "" else 0, key=f"d_{zid}", label_visibility="collapsed", min_value=0)
@@ -651,7 +664,7 @@ def main():
                         
                         # Checkbox pro prodloužení
                         is_checked = (str(old_ot).upper() == "ANO")
-                        v_ot = c3.checkbox("Bude se prodlužovat?", value=is_checked, key=f"ot_{zid}", help="Zaškrtni, pokud věříš, že zápas půjde do prodloužení. Platí pouze při rozdílu skóre o 1 gól! Za správný tip +1 bod, za špatný tip -1 bod. NEMUSÍŠ ZAŠKRTÁVAT!")
+                        v_ot = c3.checkbox("Bude se prodlužovat?", value=is_checked, key=f"ot_{zid}", help="Zaškrtni, pokud věříš, že zápas půjde do prodloužení.")
                         
                         # Varování, pokud to nedává smysl
                         if v_ot and abs(v_d - v_h) != 1:
@@ -720,7 +733,10 @@ def main():
                 m1 = c1.selectbox("Medaile 1", ht, index=ht.index(mr.get('Tip_Med1')) if mr.get('Tip_Med1') in ht else 0, key="m1", disabled=lck)
                 m2 = c2.selectbox("Medaile 2", ht, index=ht.index(mr.get('Tip_Med2')) if mr.get('Tip_Med2') in ht else 1, key="m2", disabled=lck)
                 m3 = c3.selectbox("Medaile 3", ht, index=ht.index(mr.get('Tip_Med3')) if mr.get('Tip_Med3') in ht else 2, key="m3", disabled=lck)
-                if not lck and st.form_submit_button("💾 Uložit medaile"):
+                submit_medals = st.form_submit_button("💾 Uložit medaile", disabled=lck)
+                
+                # Ukládáme jen když se klikne A NENÍ zamčeno (pojistka)
+                if submit_medals and not lck:
                     with st.spinner("Ukládám medaile..."):
                         row_idx = me_idx + 2
                         updates = [
@@ -733,7 +749,7 @@ def main():
                             ws_users.update_cells(updates)
                             st.cache_data.clear()
                             st.success("✅ Tipy na medaile byly úspěšně uloženy!")
-                            time.sleep(1) # Pauza, aby si uživatel stihl přečíst zprávu
+                            time.sleep(1) 
                             st.rerun()
                         except Exception as e: st.error(f"Chyba při ukládání: {e}")
 
@@ -1145,12 +1161,28 @@ def main():
                         ot_val = c3.selectbox("Prodloužení?", ["NE", "ANO"], index=1 if curr_ot == "ANO" else 0)
 
                         if st.form_submit_button("Uložit"):
-                            cell = ws_zapasy.find(str(sid))
-                            ws_zapasy.update_cell(cell.row, 5, d)
-                            ws_zapasy.update_cell(cell.row, 6, h)
-                            # Uložíme do sloupce H (8. sloupec)
-                            ws_zapasy.update_cell(cell.row, 8, ot_val)
-                            st.cache_data.clear(); st.success("OK"); st.rerun()
+                            try:
+                                # BEZPEČNÁ METODA: Načteme sloupec ID a najdeme řádek přesně
+                                all_ids = ws_zapasy.col_values(1) # Načte sloupec A jako seznam
+                                search_id = str(sid)
+                                
+                                if search_id in all_ids:
+                                    # Najdeme index (pořadí) v seznamu a přičteme 1 (protože řádky jsou od 1)
+                                    row_idx = all_ids.index(search_id) + 1
+                                    
+                                    # Zápis dat
+                                    ws_zapasy.update_cell(row_idx, 5, d)
+                                    ws_zapasy.update_cell(row_idx, 6, h)
+                                    ws_zapasy.update_cell(row_idx, 8, ot_val)
+                                    
+                                    st.cache_data.clear()
+                                    st.success(f"✅ Výsledek zápasu {sid} (řádek {row_idx}) uložen!")
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    st.error(f"❌ Chyba: ID zápasu '{sid}' nebylo v tabulce nalezeno.")
+                            except Exception as e:
+                                st.error(f"Chyba při komunikaci s Google Sheetem: {e}")
 
                 # 2. SPRÁVA TURNAJE A UŽIVATELŮ (Vidí POUZE Admin)
                 if user_role == 'admin':
@@ -1179,57 +1211,6 @@ def main():
                         new_s = st.radio("Stav", ["ANO", "NE"], index=0 if curr=="ANO" else 1)
                         if st.button("Změnit stav"):
                             ws_users.update_cell(u_idx+2, 12, new_s); st.cache_data.clear(); st.success("Změněno"); st.rerun()
-
-                    # --- SEKCE RESET HESLA (vylepšená verze se Session State) ---
-            with st.expander("🆘 Zapomněl jsi heslo?"):
-                # Inicializace stavu v paměti, pokud neexistuje
-                if 'reset_sent' not in st.session_state:
-                    st.session_state['reset_sent'] = False
-
-                # Pokud byla žádost odeslána, ukážeme jen hlášku
-                if st.session_state['reset_sent']:
-                    st.success("✅ **Žádost úspěšně odeslána!**")
-                    st.info("""
-                    1. Zkontroluj si email (i složku Hromadné/Spam).
-                    2. Klikni na potvrzovací odkaz v emailu.
-                    3. Teprve poté ti systém vygeneruje a zobrazí nové heslo.
-                    
-                    ⏳ **Může to trvat 2–5 minut.** (Automat běží v intervalech).
-                    """)
-                    
-                    # Tlačítko pro návrat (resetuje stav)
-                    if st.button("Zavřít a vrátit se k přihlášení"):
-                        st.session_state['reset_sent'] = False
-                        st.rerun()
-                
-                # Pokud žádost nebyla odeslána, ukážeme formulář
-                else:
-                    st.caption("Zadej svůj email. Pošleme ti potvrzovací odkaz.")
-                    reset_email = st.text_input("Tvůj registrační email", key="reset_mail_input")
-                    
-                    if st.button("🔄 Odeslat žádost"):
-                        clean_reset_email = reset_email.strip().lower()
-                        user_exists = any(str(u.get('Email')).strip().lower() == clean_reset_email for u in users)
-                        
-                        if user_exists:
-                            try:
-                                client = get_gspread_client()
-                                sh = client.open("Tipovacka_Data")
-                                try:
-                                    ws_reset = sh.worksheet("Reset")
-                                    # Zapíšeme požadavek
-                                    ws_reset.append_row([clean_reset_email, str(datetime.now()), "PENDING", ""])
-                                    
-                                    # Nastavíme stav na "Odesláno" a obnovíme stránku
-                                    st.session_state['reset_sent'] = True
-                                    st.rerun()
-                                    
-                                except gspread.WorksheetNotFound:
-                                    st.error("Chyba DB: List Reset nenalezen.")
-                            except Exception as e:
-                                st.error(f"Chyba spojení: {e}")
-                        else:
-                            st.error("Tento email v naší databázi neevidujeme.")
 
     # PATIČKA
     st.markdown('<div class="footer-warning">⚠️ <b>Tip:</b> Pro pohyb v aplikaci používej záložky. Tlačítko Zpět nebo Refresh (F5) tě může odhlásit.</div>', unsafe_allow_html=True)
