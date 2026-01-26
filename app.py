@@ -296,7 +296,7 @@ def get_user_points_at_date(users, tipy, zapasy, date_limit=None):
 # --- MAIN APP ---
 def main():
     col1, col2 = st.columns([1, 4])
-    col2.title("NATIPUJ.CZ - hokejová tipovačka - Olympiáda 2026")
+    col2.title("NATIPUJ.CZ - hokej - Olympiáda 2026")
 
     if 'logged_in' not in st.session_state:
         st.session_state['logged_in'] = False
@@ -317,11 +317,14 @@ def main():
     # --- LOGIN & REGISTRACE ---
     if not st.session_state['logged_in']:
         tab_login, tab_reg = st.tabs(["🔑 Přihlášení", "📝 Registrace"])
-        contact_info = "🆘 Zapomněl jsi heslo? Napiš na: **tipovacka.mibo@gmail.com**"
+        # Starou proměnnou contact_info jsme odstranili
 
+        # 1. ZÁLOŽKA PŘIHLÁŠENÍ
         with tab_login:
+            st.subheader("Přihlášení do aplikace")
             with st.form("login_form"):
-                email = st.text_input("Email"); password = st.text_input("Heslo", type="password")
+                email = st.text_input("Email")
+                password = st.text_input("Heslo", type="password")
                 if st.form_submit_button("Vstoupit"):
                     clean_email = email.strip().lower()
                     df_u = pd.DataFrame(users)
@@ -331,9 +334,35 @@ def main():
                         
                         if not u.empty and check_password(password, u.iloc[0]['Heslo']):
                             st.session_state['logged_in'] = True; st.session_state['user_email'] = str(u.iloc[0]['Email']); st.session_state['user_name'] = u.iloc[0]['Jmeno']; st.session_state['user_team'] = u.iloc[0].get('Tym', ''); st.session_state['user_role'] = u.iloc[0]['Role']; st.rerun()
-                        else: st.error("Chyba přihlášení.")
-            st.markdown(contact_info)
+                        else: st.error("Chyba přihlášení. Zkontroluj email a heslo.")
+            
+            st.divider()
+            
+            # --- SEKCE RESET HESLA (To, co jsme přidali minule) ---
+            with st.expander("🆘 Zapomněl jsi heslo?"):
+                st.caption("Zadej svůj email. Pokud ho v systému najdeme, pošleme ti na něj nové dočasné heslo.")
+                reset_email = st.text_input("Tvůj registrační email", key="reset_mail_input")
+                
+                if st.button("🔄 Obnovit heslo"):
+                    clean_reset_email = reset_email.strip().lower()
+                    user_exists = any(str(u.get('Email')).strip().lower() == clean_reset_email for u in users)
+                    
+                    if user_exists:
+                        try:
+                            client = get_gspread_client()
+                            sh = client.open("Tipovacka_Data")
+                            try:
+                                ws_reset = sh.worksheet("Reset")
+                                ws_reset.append_row([clean_reset_email, str(datetime.now()), "PENDING"])
+                                st.success("✅ Požadavek odeslán! Během chvilky ti dorazí email s novým heslem.")
+                            except gspread.WorksheetNotFound:
+                                st.error("Chyba: V databázi chybí list 'Reset'. Kontaktuj admina.")
+                        except Exception as e:
+                            st.error(f"Chyba spojení: {e}")
+                    else:
+                        st.error("Tento email v naší databázi neevidujeme.")
 
+        # 2. ZÁLOŽKA REGISTRACE
         with tab_reg:
             # Kontrola kapacity
             if len(users) >= MAX_PLAYERS:
@@ -344,7 +373,7 @@ def main():
                     r_email = st.text_input("Email")
                     r_name = st.text_input("Jméno")
                     r_pass = st.text_input("Heslo", type="password")
-                    r_pass2 = st.text_input("Kontrola hesla", type="password") # NOVÉ: Kontrola
+                    r_pass2 = st.text_input("Kontrola hesla", type="password")
                     
                     if st.form_submit_button("Vytvořit účet"):
                         email_clean = r_email.strip().lower()
@@ -355,15 +384,15 @@ def main():
                         if email_exists: st.error("Tento email už existuje!")
                         elif name_exists: st.error(f"Jméno '{r_name}' už někdo používá.")
                         elif not r_email or not r_name or not r_pass: st.error("Vyplň všechna pole.")
-                        elif r_pass != r_pass2: st.error("Hesla se neshodují!") # NOVÉ: Validace
+                        elif r_pass != r_pass2: st.error("Hesla se neshodují!")
                         else:
                             hashed_pw = make_hash(r_pass)
                             # Default role 'user'
-                            ws_users.append_row([r_email, r_name, hashed_pw, 0, 'user', '', '', '', '', '', 'NE', ''])
+                            # UPRAVENO: Přidány prázdné stringy pro sloupce L a M, a 'ANO' pro N (Notifikace)
+                            ws_users.append_row([r_email, r_name, hashed_pw, 0, 'user', '', '', '', '', '', 'NE', '', '', 'ANO'])
                             st.cache_data.clear()
                             st.success("Registrace úspěšná! Přihlašuji...")
                             
-                            # NOVÉ: Auto Login - okamžité nastavení session
                             st.session_state['logged_in'] = True
                             st.session_state['user_email'] = r_email
                             st.session_state['user_name'] = r_name
@@ -371,7 +400,6 @@ def main():
                             st.session_state['user_role'] = 'user'
                             time.sleep(1)
                             st.rerun()
-            st.markdown(contact_info)
 
     # --- APP (PŘIHLÁŠEN) ---
     else:
@@ -618,8 +646,8 @@ def main():
                         old_ot = mt.get('Tip_Prodlouzeni', '') # Načtení z DB (sloupec E)
                         
                         # Inputy
-                        v_d = c1.number_input("D", value=int(old_d) if old_d != "" else 0, key=f"d_{zid}", label_visibility="collapsed")
-                        v_h = c2.number_input("H", value=int(old_h) if old_h != "" else 0, key=f"h_{zid}", label_visibility="collapsed")
+                        v_d = c1.number_input("D", value=int(old_d) if old_d != "" else 0, key=f"d_{zid}", label_visibility="collapsed", min_value=0)
+                        v_h = c2.number_input("H", value=int(old_h) if old_h != "" else 0, key=f"h_{zid}", label_visibility="collapsed", min_value=0)
                         
                         # Checkbox pro prodloužení
                         is_checked = (str(old_ot).upper() == "ANO")
@@ -693,16 +721,21 @@ def main():
                 m2 = c2.selectbox("Medaile 2", ht, index=ht.index(mr.get('Tip_Med2')) if mr.get('Tip_Med2') in ht else 1, key="m2", disabled=lck)
                 m3 = c3.selectbox("Medaile 3", ht, index=ht.index(mr.get('Tip_Med3')) if mr.get('Tip_Med3') in ht else 2, key="m3", disabled=lck)
                 if not lck and st.form_submit_button("💾 Uložit medaile"):
-                    row_idx = me_idx + 2
-                    updates = [
-                        gspread.Cell(row_idx, 7, sw),
-                        gspread.Cell(row_idx, 8, m1),
-                        gspread.Cell(row_idx, 9, m2),
-                        gspread.Cell(row_idx, 10, m3)
-                    ]
-                    try:
-                        ws_users.update_cells(updates); st.cache_data.clear(); st.success("Uloženo!"); st.rerun()
-                    except Exception as e: st.error(f"Chyba při ukládání: {e}")
+                    with st.spinner("Ukládám medaile..."):
+                        row_idx = me_idx + 2
+                        updates = [
+                            gspread.Cell(row_idx, 7, sw),
+                            gspread.Cell(row_idx, 8, m1),
+                            gspread.Cell(row_idx, 9, m2),
+                            gspread.Cell(row_idx, 10, m3)
+                        ]
+                        try:
+                            ws_users.update_cells(updates)
+                            st.cache_data.clear()
+                            st.success("✅ Tipy na medaile byly úspěšně uloženy!")
+                            time.sleep(1) # Pauza, aby si uživatel stihl přečíst zprávu
+                            st.rerun()
+                        except Exception as e: st.error(f"Chyba při ukládání: {e}")
 
         # 4. ŽEBŘÍČEK
         with t_rank:
@@ -900,7 +933,11 @@ def main():
                 # A. ZMĚNA ÚDAJŮ
                 with st.form("prof"):
                     st.subheader("Osobní údaje")
-                    new_name = st.text_input("Změnit jméno", value=current_data['Jmeno'])
+                    # Jméno je nyní statické (nelze editovat)
+                    st.write(f"Jméno hráče: **{current_data['Jmeno']}**")
+                    
+                    st.divider()
+                    st.subheader("Týmová příslušnost")
                     st.write(f"Aktuální tým: **{curr_team if curr_team else 'Žádný'}**")
                     
                     c1, c2 = st.columns(2)
@@ -911,14 +948,18 @@ def main():
                         new_t = st.text_input("Nebo založit nový")
                         if new_t: final_team = new_t
                         
-                    if st.form_submit_button("💾 Uložit údaje"):
+                    if st.form_submit_button("💾 Uložit změnu týmu"):
                         row_idx = current_u_idx + 2
-                        updates = [gspread.Cell(row_idx, 2, new_name), gspread.Cell(row_idx, 6, final_team)]
+                        # Aktualizujeme POUZE sloupec 6 (Tým), sloupec 2 (Jméno) necháváme být
+                        updates = [gspread.Cell(row_idx, 6, final_team)]
                         try:
                             ws_users.update_cells(updates)
-                            st.session_state['user_name'] = new_name
+                            # st.session_state['user_name'] už neměníme
                             st.session_state['user_team'] = final_team
-                            st.cache_data.clear(); st.success("Profil aktualizován!"); time.sleep(1); st.rerun()
+                            st.cache_data.clear()
+                            st.success("✅ Tým byl úspěšně aktualizován!")
+                            time.sleep(1)
+                            st.rerun()
                         except Exception as e: st.error(f"Chyba při ukládání: {e}")
 
                 st.divider()
@@ -1006,8 +1047,8 @@ def main():
                 df_hist_f = pd.DataFrame(history_football)
                 st.dataframe(df_hist_f.style.set_properties(**{'text-align': 'center'}).set_table_styles([dict(selector='th', props=[('text-align', 'center')])]), use_container_width=True, hide_index=True)
                 st.divider()
-            st.subheader("Pořadí hráčů: Síň slávy")
-            st.markdown("Historická úspěšnost hráčů napříč všemi sporty (seřazeno dle medailí: 🥇 > 🥈 > 🥉).")
+            st.subheader("Pořadí hráčů")
+            st.markdown("Historická úspěšnost hráčů napříč všemi turnaji (seřazeno dle medailí: 🥇 > 🥈 > 🥉).")
 
             # 1. Agregace dat
             # Sloučíme oba seznamy do jednoho
@@ -1139,23 +1180,56 @@ def main():
                         if st.button("Změnit stav"):
                             ws_users.update_cell(u_idx+2, 12, new_s); st.cache_data.clear(); st.success("Změněno"); st.rerun()
 
-                    # NOVÉ: RESET HESLA
-                    with st.expander("Správa uživatelů (Reset hesla)"):
-                        st.caption("Resetuje heslo vybraného uživatele na: **tipovacka**")
-                        users_list_reset = [f"{u['Jmeno']} ({u['Email']})" for u in users]
-                        sel_user_reset = st.selectbox("Vyber uživatele pro reset", users_list_reset)
+                    # --- SEKCE RESET HESLA (vylepšená verze se Session State) ---
+            with st.expander("🆘 Zapomněl jsi heslo?"):
+                # Inicializace stavu v paměti, pokud neexistuje
+                if 'reset_sent' not in st.session_state:
+                    st.session_state['reset_sent'] = False
+
+                # Pokud byla žádost odeslána, ukážeme jen hlášku
+                if st.session_state['reset_sent']:
+                    st.success("✅ **Žádost úspěšně odeslána!**")
+                    st.info("""
+                    1. Zkontroluj si email (i složku Hromadné/Spam).
+                    2. Klikni na potvrzovací odkaz v emailu.
+                    3. Teprve poté ti systém vygeneruje a zobrazí nové heslo.
+                    
+                    ⏳ **Může to trvat 2–5 minut.** (Automat běží v intervalech).
+                    """)
+                    
+                    # Tlačítko pro návrat (resetuje stav)
+                    if st.button("Zavřít a vrátit se k přihlášení"):
+                        st.session_state['reset_sent'] = False
+                        st.rerun()
+                
+                # Pokud žádost nebyla odeslána, ukážeme formulář
+                else:
+                    st.caption("Zadej svůj email. Pošleme ti potvrzovací odkaz.")
+                    reset_email = st.text_input("Tvůj registrační email", key="reset_mail_input")
+                    
+                    if st.button("🔄 Odeslat žádost"):
+                        clean_reset_email = reset_email.strip().lower()
+                        user_exists = any(str(u.get('Email')).strip().lower() == clean_reset_email for u in users)
                         
-                        if st.button("♻️ Resetovat heslo"):
-                            sel_email_r = sel_user_reset.split(" (")[-1].replace(")", "")
-                            u_idx_r = next((i for i, u in enumerate(users) if str(u['Email']) == sel_email_r), 0)
-                            
-                            # Vygenerujeme hash pro defaultní heslo
-                            default_pw_hash = make_hash("tipovacka")
-                            
-                            # Uložíme do DB (sloupec 3 = Heslo)
-                            ws_users.update_cell(u_idx_r + 2, 3, default_pw_hash)
-                            st.cache_data.clear()
-                            st.success(f"Heslo pro {sel_email_r} resetováno na 'tipovacka'.")
+                        if user_exists:
+                            try:
+                                client = get_gspread_client()
+                                sh = client.open("Tipovacka_Data")
+                                try:
+                                    ws_reset = sh.worksheet("Reset")
+                                    # Zapíšeme požadavek
+                                    ws_reset.append_row([clean_reset_email, str(datetime.now()), "PENDING", ""])
+                                    
+                                    # Nastavíme stav na "Odesláno" a obnovíme stránku
+                                    st.session_state['reset_sent'] = True
+                                    st.rerun()
+                                    
+                                except gspread.WorksheetNotFound:
+                                    st.error("Chyba DB: List Reset nenalezen.")
+                            except Exception as e:
+                                st.error(f"Chyba spojení: {e}")
+                        else:
+                            st.error("Tento email v naší databázi neevidujeme.")
 
     # PATIČKA
     st.markdown('<div class="footer-warning">⚠️ <b>Tip:</b> Pro pohyb v aplikaci používej záložky. Tlačítko Zpět nebo Refresh (F5) tě může odhlásit.</div>', unsafe_allow_html=True)
