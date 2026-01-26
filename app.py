@@ -10,7 +10,7 @@ import hashlib
 import pytz
 
 # --- KONFIGURACE A KONSTANTY ---
-st.set_page_config(page_title="Tipovačka hokej - Olympiáda 2026", layout="wide", page_icon="🏒")
+st.set_page_config(page_title="Tipovačka - Olympiáda 2026", layout="wide", page_icon="🏆")
 
 # Limit hráčů pro registraci přes formulář
 MAX_PLAYERS = 40
@@ -18,6 +18,7 @@ MAX_PLAYERS = 40
 # Indexy sloupců v Google Sheetu "Tipy" (gspread je 1-based)
 COL_TIP_DOMACI = 3
 COL_TIP_HOSTE = 4
+COL_TIP_PRODLOUZENI = 5
 
 st.markdown("""
 <style>
@@ -138,18 +139,31 @@ def get_worksheets_resources():
 # --- POMOCNÉ FUNKCE (LOGIKA) ---
 def parse_date(date_str):
     if not date_str: return None
-    # Pokud už je to datetime (díky optimalizaci), vrátíme ho
     if isinstance(date_str, datetime): return date_str
     
+    dt = None
     for fmt in ("%Y-%m-%d %H:%M", "%d.%m.%Y %H:%M", "%Y-%m-%d", "%d.%m.%Y"):
-        try: return datetime.strptime(str(date_str), fmt)
+        try: 
+            dt = datetime.strptime(str(date_str), fmt)
+            break
         except ValueError: continue
+    
+    # Pokud se podařilo načíst datum, přiřadíme mu natvrdo Prahu (předpokládáme, že Excel je v CZ čase)
+    if dt:
+        prague_tz = pytz.timezone('Europe/Prague')
+        # Pokud datum nemá časovou zónu, přidáme ji
+        if dt.tzinfo is None:
+            return prague_tz.localize(dt)
+        return dt
     return None
 
 def is_past_deadline(deadline_str):
     if not deadline_str: return False
     d = parse_date(deadline_str)
-    return d and datetime.now() > d
+    # Porovnáváme s aktuálním časem v Praze
+    prague_tz = pytz.timezone('Europe/Prague')
+    now_cz = datetime.now(prague_tz)
+    return d and now_cz > d
 
 def get_all_teams(zapasy):
     teams = set()
@@ -171,48 +185,69 @@ def save_tips_batch(ws_tipy, user_email, tips_to_save, existing_tips):
         # i + 2, protože gspread je 1-based a 1. řádek je hlavička
         existing_map[(str(row['Email']), str(row['Zapas_ID']))] = i + 2
         
-    for zid, (d, h) in tips_to_save.items():
+    for zid, (d, h, ot) in tips_to_save.items():
+        # Validace: Prodloužení ukládáme jen, pokud je rozdíl gólů 1
+        final_ot = ot if abs(int(d) - int(h)) == 1 else ""
+        
         key = (user_email, str(zid))
         if key in existing_map:
             row_idx = existing_map[key]
             updates.append(gspread.Cell(row_idx, COL_TIP_DOMACI, d))
             updates.append(gspread.Cell(row_idx, COL_TIP_HOSTE, h))
+            updates.append(gspread.Cell(row_idx, COL_TIP_PRODLOUZENI, final_ot))
         else:
-            new_rows.append([user_email, zid, d, h])
+            new_rows.append([user_email, zid, d, h, final_ot])
             
     if updates: ws_tipy.update_cells(updates)
     if new_rows: ws_tipy.append_rows(new_rows)
     st.cache_data.clear() # Invalidace cache dat
 
 # --- LOGIKA BODŮ ---
-def spocitej_body_zapas(tip_d, tip_h, real_d, real_h, team_d, team_h, faze):
-    if str(real_d) == "" or str(real_h) == "": return 0, False, False
+def spocitej_body_zapas(tip_d, tip_h, real_d, real_h, team_d, team_h, faze, tip_ot="", real_ot=""):
+    if str(real_d) == "" or str(real_h) == "": return 0, False, False, 0
     try:
         tip_d, tip_h = int(tip_d), int(tip_h)
         real_d, real_h = int(real_d), int(real_h)
-    except: return 0, False, False
+    except: return 0, False, False, 0
 
     base_points = 0
+    ot_points = 0
     is_exact = False
+    
+    # 1. Základní body
     winner_real = 1 if real_d > real_h else 2
     winner_tip = 1 if tip_d > tip_h else (2 if tip_h > tip_d else 0)
-    if winner_real != winner_tip: return 0, False, False
+    
+    if winner_real == winner_tip:
+        diff = abs(real_d - tip_d) + abs(real_h - tip_h)
+        base_points += max(2, 7 - diff)
+        if tip_d == real_d and tip_h == real_h:
+            base_points += 2
+            is_exact = True
 
-    diff = abs(real_d - tip_d) + abs(real_h - tip_h)
-    base_points += max(2, 7 - diff)
-
-    if tip_d == real_d and tip_h == real_h:
-        base_points += 2
-        is_exact = True
-
+    # Multiplikátor Playoff (pouze na základní body)
     if "playoff" in str(faze).lower():
         base_points = math.ceil(base_points * 1.5)
 
+    # Bonus Česko
     match_teams = (str(team_d) + " " + str(team_h)).lower()
-    if "česko" in match_teams or "czech" in match_teams:
+    if ("česko" in match_teams or "czech" in match_teams) and base_points > 0:
         base_points += 2
 
-    return base_points, is_exact, (base_points > 0)
+    # 2. Bonus za Prodloužení (+1 / -1)
+    # Počítá se jen pokud byl rozdíl gólů v tipu 1 a uživatel zaškrtnul OT
+    if abs(tip_d - tip_h) == 1 and str(tip_ot).strip() != "":
+        user_predicted_ot = True
+        match_was_ot = (str(real_ot).strip().upper() == "ANO")
+        
+        if user_predicted_ot:
+            if match_was_ot:
+                ot_points += 1  # Trefil remízu po 60 min
+            else:
+                ot_points -= 1  # Netrefil
+    
+    total_points = base_points + ot_points
+    return total_points, is_exact, (total_points > 0 or ot_points != 0), ot_points
 
 def spocitej_dlouhodobe_body(user_row, official_results):
     body = 0
@@ -248,14 +283,20 @@ def get_user_points_at_date(users, tipy, zapasy, date_limit=None):
                 email = str(u['Email'])
                 t = tips_map.get((email, z['ID']))
                 if t:
-                    p, _, _ = spocitej_body_zapas(t['Tip_Domaci'], t['Tip_Hoste'], z['Skore_Domaci'], z['Skore_Hoste'], z['Domaci'], z['Hoste'], z.get('Faze',''))
+                    # OPRAVA ZDE: Přidáno čtvrté podtržítko pro ignorování OT bodů v této statistice
+                    p, _, _, _ = spocitej_body_zapas(
+                        t['Tip_Domaci'], t['Tip_Hoste'], 
+                        z['Skore_Domaci'], z['Skore_Hoste'], 
+                        z['Domaci'], z['Hoste'], z.get('Faze',''),
+                        t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
+                    )
                     points[email] += p
     return points
 
 # --- MAIN APP ---
 def main():
     col1, col2 = st.columns([1, 4])
-    col2.title("🏒 Tipovačka hokej - Olympiáda 2026")
+    col2.title("NATIPUJ.CZ - hokejová tipovačka - Olympiáda 2026")
 
     if 'logged_in' not in st.session_state:
         st.session_state['logged_in'] = False
@@ -348,13 +389,15 @@ def main():
 
         for z in zapasy:
             if str(z['Skore_Domaci']) == "":
-                match_dt_naive = z.get('Datum_Obj')
-                if match_dt_naive:
-                    try: match_dt_aware_temp = prague_tz.localize(match_dt_naive)
-                    except ValueError: match_dt_aware_temp = match_dt_naive.replace(tzinfo=prague_tz)
-                    if match_dt_aware_temp > now_prague:
+                match_dt = z.get('Datum_Obj') # Toto už je nyní díky nové parse_date "aware" (má zónu)
+                if match_dt:
+                    # Pro jistotu, kdyby náhodou zónu neměl (stará cache), ošetříme to:
+                    if match_dt.tzinfo is None:
+                        match_dt = prague_tz.localize(match_dt)
+                    
+                    if match_dt > now_prague:
                         upcoming_match = z
-                        match_dt_aware = match_dt_aware_temp
+                        match_dt_aware = match_dt
                         break
         
         if upcoming_match and match_dt_aware:
@@ -381,6 +424,10 @@ def main():
 
         # VÝPOČTY BODŮ
         match_points = {}; exact_matches = {}; matches_scored = {}; stats_basic = {}; stats_playoff = {}
+        # Nové bonusové kontejnery
+        bonus_odvaha = {str(u['Email']): 0 for u in users}
+        bonus_tiper_dne = {str(u['Email']): 0 for u in users}
+        
         zapas_map = {z['ID']: z for z in zapasy}
         finished_matches = [z for z in zapasy if str(z['Skore_Domaci']) != ""]
         is_tournament_over = (len(finished_matches) == len(zapasy) and len(zapasy) > 0)
@@ -390,21 +437,95 @@ def main():
             match_points[email] = 0; exact_matches[email] = 0; matches_scored[email] = 0; stats_basic[email] = 0; stats_playoff[email] = 0
             
         tips_map = {}
+        tips_by_match = {} # Pro výpočet procent (Odvaha)
+        
         for t in tipy:
             tips_map[(str(t['Email']), t['Zapas_ID'])] = t
-            zid = t['Zapas_ID']; email = str(t['Email'])
+            tips_by_match.setdefault(t['Zapas_ID'], []).append(t)
             
+        # 1. ZÁKLADNÍ PRŮCHOD (Body za zápasy + Prodloužení)
+        for t in tipy:
+            zid = t['Zapas_ID']; email = str(t['Email'])
             if zid in zapas_map and str(zapas_map[zid]['Skore_Domaci']) != "":
                 z = zapas_map[zid]
                 faze = str(z.get('Faze', '')).lower()
-                p, ie, sa = spocitej_body_zapas(t['Tip_Domaci'], t['Tip_Hoste'], z['Skore_Domaci'], z['Skore_Hoste'], z['Domaci'], z['Hoste'], faze)
+                # Voláme novou verzi funkce s prodloužením
+                p, ie, sa, _ = spocitej_body_zapas(
+                    t['Tip_Domaci'], t['Tip_Hoste'], z['Skore_Domaci'], z['Skore_Hoste'], 
+                    z['Domaci'], z['Hoste'], faze,
+                    t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
+                )
                 match_points[email] += p
                 if ie: exact_matches[email] += 1
                 if sa: matches_scored[email] += 1
                 if "playoff" in faze or "finále" in faze or "o 3. místo" in faze: stats_playoff[email] += p
                 else: stats_basic[email] += p
 
-        # Bonus ostrostřelci
+        # 2. VÝPOČET: BONUS ZA ODVAHU (Underdog)
+        for z in finished_matches:
+            zid = z['ID']
+            match_tips = tips_by_match.get(zid, [])
+            if not match_tips: continue
+            
+            # Kolik % věří komu
+            cnt_d = sum(1 for mt in match_tips if mt['Tip_Domaci'] > mt['Tip_Hoste'])
+            cnt_h = sum(1 for mt in match_tips if mt['Tip_Hoste'] > mt['Tip_Domaci'])
+            total = len(match_tips)
+            if total == 0: continue
+            
+            perc_d = cnt_d / total; perc_h = cnt_h / total
+            
+            # Kdo vyhrál?
+            rd, rh = int(z['Skore_Domaci']), int(z['Skore_Hoste'])
+            winner = 'd' if rd > rh else ('h' if rh > rd else 'draw')
+            
+            # Podmínka < 20%
+            is_underdog_win = (winner == 'd' and perc_d < 0.20) or (winner == 'h' and perc_h < 0.20)
+            
+            if is_underdog_win:
+                for mt in match_tips:
+                    u_win = 'd' if mt['Tip_Domaci'] > mt['Tip_Hoste'] else ('h' if mt['Tip_Hoste'] > mt['Tip_Domaci'] else 'draw')
+                    if u_win == winner:
+                        bonus_odvaha[str(mt['Email'])] += 1
+
+        # 3. VÝPOČET: TIPER DNE (Zpětně podle dnů)
+        tiper_dne_log = [] # Data pro tabulku ve statistikách
+        dates = sorted(list(set([z['Datum_Obj'].date() for z in finished_matches if z.get('Datum_Obj')])))
+        
+        for d_date in dates:
+            matches_that_day = [z for z in finished_matches if z.get('Datum_Obj') and z['Datum_Obj'].date() == d_date]
+            if not matches_that_day: continue
+            
+            daily_pts = {str(u['Email']): 0 for u in users}
+            for z in matches_that_day:
+                for u in users:
+                    email = str(u['Email'])
+                    t = tips_map.get((email, z['ID']))
+                    if t:
+                        p, _, _, _ = spocitej_body_zapas(
+                            t['Tip_Domaci'], t['Tip_Hoste'], z['Skore_Domaci'], z['Skore_Hoste'], 
+                            z['Domaci'], z['Hoste'], z.get('Faze',''),
+                            t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
+                        )
+                        daily_pts[email] += p
+            
+            # Kdo byl nejlepší ten den?
+            if daily_pts:
+                max_val = max(daily_pts.values())
+                if max_val > 0: # Musí mít aspoň bod
+                    winners = [e for e, s in daily_pts.items() if s == max_val]
+                    bonus_val = 0.5 * len(matches_that_day)
+                    
+                    # Zápis bonusů
+                    for w in winners:
+                        bonus_tiper_dne[w] += bonus_val
+                        # Logování pro statistiku (jen pokud je to včera - pro "aktuálnost", nebo vše? Zadání říká "ukazovat kdo získal za předchozí den")
+                        # Uložíme si seznam všech vítězů dnů pro historii, filtrovat budeme při zobrazení
+                        w_name = next((u['Jmeno'] for u in users if str(u['Email']) == w), w)
+                        tiper_dne_log.append({"Datum": d_date, "Jméno": w_name, "Body ten den": max_val, "Bonus": bonus_val})
+
+        # Kompletace celkových bodů
+        # Bonus ostrostřelci (Původní logika)
         max_exact = 0; bonus_ostrostrelci = {}
         if exact_matches: max_exact = max(exact_matches.values())
         for email, count in exact_matches.items():
@@ -413,11 +534,14 @@ def main():
         long_term_points = {}
         for u in users:
             email = str(u['Email'])
-            long_term_points[email] = spocitej_dlouhodobe_body(u, OFFICIAL_RESULTS) + bonus_ostrostrelci.get(email, 0)
+            lt_pts = spocitej_dlouhodobe_body(u, OFFICIAL_RESULTS)
+            # SEČTENÍ VŠECH NOVÝCH BONUSŮ ZDE:
+            total_bonus = lt_pts + bonus_ostrostrelci.get(email, 0) + bonus_odvaha.get(email, 0) + bonus_tiper_dne.get(email, 0)
+            long_term_points[email] = total_bonus
         
         total_points = {e: match_points.get(e, 0) + long_term_points.get(e, 0) for e in match_points}
 
-        # PŘÍPRAVA DAT PRO ŽEBŘÍČEK & TRENDY
+        # PŘÍPRAVA DAT PRO ŽEBŘÍČEK
         rd = []
         for u in users:
             e = str(u['Email'])
@@ -425,7 +549,7 @@ def main():
                 "Email": e, 
                 "Hráč": u['Jmeno'], 
                 "Tým": u.get('Tym', '-'), 
-                "Zaplaceno": str(u.get('Zaplaceno', 'NE')).upper(), # Pro filtrování vítězů
+                "Zaplaceno": str(u.get('Zaplaceno', 'NE')).upper(), 
                 "Body Zápasy": match_points.get(e,0), 
                 "Body Bonusy": long_term_points.get(e,0), 
                 "Celkem": total_points.get(e,0)
@@ -435,7 +559,8 @@ def main():
         df_rank['Poradi'] = df_rank.index
 
         # Trendy
-        yesterday_limit = datetime.now() - timedelta(days=1)
+        prague_tz = pytz.timezone('Europe/Prague')  # 1. Musíme znát zónu
+        yesterday_limit = datetime.now(prague_tz) - timedelta(days=1) # 2. Teď je 'yesterday_limit' aware (má zónu)
         pts_yesterday = get_user_points_at_date(users, tipy, zapasy, date_limit=yesterday_limit)
         rd_prev = []
         for u in users:
@@ -476,18 +601,45 @@ def main():
                     st.markdown(f"**{label}** <small>({d_str})</small>", unsafe_allow_html=True)
                     if str(z['Skore_Domaci']) != "":
                         mt = moje_tipy_dict.get(zid, {})
-                        p, ie, _ = spocitej_body_zapas(mt.get('d'), mt.get('h'), z['Skore_Domaci'], z['Skore_Hoste'], z['Domaci'], z['Hoste'], z.get('Faze',''))
-                        st.info(f"Výsledek: {z['Skore_Domaci']}:{z['Skore_Hoste']} | Tvůj tip: {mt.get('d','-')}:{mt.get('h','-')} | **{p}b** {'⭐' if ie else ''}")
+                        # Voláme novou spocitej_body_zapas
+                        p, ie, _, ot_p = spocitej_body_zapas(
+                            mt.get('Tip_Domaci'), mt.get('Tip_Hoste'), 
+                            z['Skore_Domaci'], z['Skore_Hoste'], 
+                            z['Domaci'], z['Hoste'], z.get('Faze',''),
+                            mt.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
+                        )
+                        ot_txt = f" (OT: {ot_p}b)" if ot_p != 0 else ""
+                        st.info(f"Výsledek: {z['Skore_Domaci']}:{z['Skore_Hoste']} | Tvůj tip: {mt.get('Tip_Domaci','-')}:{mt.get('Tip_Hoste','-')} | **{p}b** {ot_txt}")
                     else:
-                        c1, c2, _ = st.columns([1,1,3])
-                        mt = moje_tipy_dict.get(zid, {'d': 0, 'h': 0})
-                        v_d = c1.number_input("D", value=int(mt['d']), key=f"d_{zid}", label_visibility="collapsed")
-                        v_h = c2.number_input("H", value=int(mt['h']), key=f"h_{zid}", label_visibility="collapsed")
-                        tips_to_save[zid] = (v_d, v_h)
+                        c1, c2, c3 = st.columns([1,1,3])
+                        # Načtení starých hodnot
+                        old_d = mt.get('Tip_Domaci', 0)
+                        old_h = mt.get('Tip_Hoste', 0)
+                        old_ot = mt.get('Tip_Prodlouzeni', '') # Načtení z DB (sloupec E)
+                        
+                        # Inputy
+                        v_d = c1.number_input("D", value=int(old_d) if old_d != "" else 0, key=f"d_{zid}", label_visibility="collapsed")
+                        v_h = c2.number_input("H", value=int(old_h) if old_h != "" else 0, key=f"h_{zid}", label_visibility="collapsed")
+                        
+                        # Checkbox pro prodloužení
+                        is_checked = (str(old_ot).upper() == "ANO")
+                        v_ot = c3.checkbox("Bude se prodlužovat?", value=is_checked, key=f"ot_{zid}", help="Zaškrtni, pokud věříš, že zápas půjde do prodloužení. Platí pouze při rozdílu skóre o 1 gól! Za správný tip +1 bod, za špatný tip -1 bod. NEMUSÍŠ ZAŠKRTÁVAT!")
+                        
+                        # Varování, pokud to nedává smysl
+                        if v_ot and abs(v_d - v_h) != 1:
+                            c3.caption("⚠️ Tip na prodloužení se neuloží (rozdíl není 1 gól).")
+                        elif v_ot:
+                            c3.caption("✅ Tip na prodloužení aktivní.")
+                            
+                        # Ukládáme trojici (D, H, OT)
+                        tips_to_save[zid] = (v_d, v_h, "ANO" if v_ot else "")
                     st.write("---")
                 if st.form_submit_button("💾 Uložit tipy"):
-                    with st.spinner("Ukládám..."): save_tips_batch(ws_tipy, st.session_state['user_email'], tips_to_save, tipy); st.success("Uloženo!"); time.sleep(1); st.rerun()
+                    with st.spinner("Ukládám..."): 
+                        save_tips_batch(ws_tipy, st.session_state['user_email'], tips_to_save, tipy)
+                        st.success("Uloženo!"); time.sleep(1); st.rerun()
 
+        # 2. PŘEHLED
         # 2. PŘEHLED
         with t_overview:
             st.header("Globální přehled tipů")
@@ -501,11 +653,21 @@ def main():
                         "Fáze": faze, 
                         "Výsledek": f"{z['Skore_Domaci']}:{z['Skore_Hoste']}"
                     }
+                    if str(z.get('Prodlouzeni','')) == 'ANO': row["Výsledek"] += " pp"
+
                     for u in users:
                         t = tips_map.get((str(u['Email']), z['ID']))
                         if t:
-                            p, ie, _ = spocitej_body_zapas(t['Tip_Domaci'], t['Tip_Hoste'], z['Skore_Domaci'], z['Skore_Hoste'], z['Domaci'], z['Hoste'], z.get('Faze',''))
-                            txt = f"{t['Tip_Domaci']}:{t['Tip_Hoste']} ({p}b)"
+                            # OPRAVA ZDE: Přebíráme 4 hodnoty (p, ie, _, ot)
+                            p, ie, _, _ = spocitej_body_zapas(
+                                t['Tip_Domaci'], t['Tip_Hoste'], 
+                                z['Skore_Domaci'], z['Skore_Hoste'], 
+                                z['Domaci'], z['Hoste'], z.get('Faze',''),
+                                t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
+                            )
+                            txt = f"{t['Tip_Domaci']}:{t['Tip_Hoste']}"
+                            if str(t.get('Tip_Prodlouzeni','')) == 'ANO': txt += " (OT)"
+                            txt += f" ({p}b)"
                             if ie: txt = f"⭐ {txt}"
                         else: txt = "-"
                         row[u['Jmeno']] = txt
@@ -587,23 +749,66 @@ def main():
         # 5. STATISTIKY
         with t_stats:
             st.header("Statistika nuda je, má však cenné údaje")
+
+            # --- NOVÉ STATISTIKY (Tiper Dne & Odvaha) ---
+            col_spec1, col_spec2 = st.columns(2)
+
+            with col_spec1:
+                st.markdown("#### 📅 Tiper Dne")
+                st.caption("Kdo získal bonus za **včerejší** den? (Nejvíce bodů za den)")
+                
+                # Zjištění včerejška pro zobrazení "aktuálního" vítěze
+                yesterday = datetime.now().date() - timedelta(days=1)
+                yesterday_winners = [x for x in tiper_dne_log if x['Datum'] == yesterday]
+                
+                if yesterday_winners:
+                    st.write(f"**Vítězové ze dne {yesterday.strftime('%d.%m.')}:**")
+                    st.dataframe(pd.DataFrame(yesterday_winners)[['Jméno', 'Body ten den', 'Bonus']], use_container_width=True, hide_index=True)
+                else:
+                    st.info(f"Za včerejšek ({yesterday.strftime('%d.%m.')}) nebyl udělen žádný bonus.")
+                
+                with st.expander("🏆 Celkový žebříček: Tiper Dne"):
+                    td_data = [{"Jméno": u['Jmeno'], "Celkem Bonus": bonus_tiper_dne.get(str(u['Email']), 0)} for u in users if bonus_tiper_dne.get(str(u['Email']), 0) > 0]
+                    if td_data:
+                        st.dataframe(pd.DataFrame(td_data).sort_values("Celkem Bonus", ascending=False), use_container_width=True, hide_index=True)
+                    else:
+                        st.write("Zatím nikdo.")
+
+            with col_spec2:
+                st.markdown("#### 🦁 Bonus za Odvahu")
+                st.caption("Hráči, kteří trefili vítěze, na kterého sázelo **méně než 20 %** lidí (+1 bod).")
+                
+                odvaha_data = [{"Jméno": u['Jmeno'], "Body za Odvahu": bonus_odvaha.get(str(u['Email']), 0)} for u in users if bonus_odvaha.get(str(u['Email']), 0) > 0]
+                
+                if odvaha_data:
+                    st.dataframe(pd.DataFrame(odvaha_data).sort_values("Body za Odvahu", ascending=False), use_container_width=True, hide_index=True)
+                else:
+                    st.info("Zatím se nenašel žádný odvážlivec, který by trefil překvapení.")
+
+            st.divider()
+
+            # --- PŮVODNÍ STATISTIKY ---
             st.subheader("🍀 Šťastná ruka & 💀 Zabiják tiketů")
             st.caption("Zápasy s nejvyšším a nejnižším průměrem bodů na hráče.")
 
             if finished_matches:
-                tips_by_match = {}
-                for t in tipy: tips_by_match.setdefault(t['Zapas_ID'], []).append(t)
-
+                # Přepočet statistik pro zápasy
                 match_stats = []
                 for z in finished_matches:
                     tips_for_z = tips_by_match.get(z['ID'], [])
                     if not tips_for_z: continue
+                    
                     total_pts = 0; count = 0
                     faze_lower = str(z.get('Faze', '')).lower()
                     is_playoff = any(x in faze_lower for x in ["playoff", "finále", "o 3. místo", "čtvrtfinále", "semifinále"])
 
                     for t in tips_for_z:
-                        p, _, _ = spocitej_body_zapas(t['Tip_Domaci'], t['Tip_Hoste'], z['Skore_Domaci'], z['Skore_Hoste'], z['Domaci'], z['Hoste'], z.get('Faze',''))
+                        # Zde musíme použít správnou funkci pro výpočet bodů, kterou jsme definovali dříve (včetně OT)
+                        p, _, _, _ = spocitej_body_zapas(
+                            t['Tip_Domaci'], t['Tip_Hoste'], z['Skore_Domaci'], z['Skore_Hoste'], 
+                            z['Domaci'], z['Hoste'], z.get('Faze',''),
+                            t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
+                        )
                         total_pts += p; count += 1
                     
                     if count > 0:
@@ -756,8 +961,13 @@ def main():
             * **Tipy na medailisty:**
                 * **+15 bodů** za vítěze turnaje.
                 * **+4 body** za každého trefeného medailistu.
-            * **Bonusy:**
+            * **Tiper dne**
+                * Ten kdo za daný hrací den získal nejvíce bodů, získává navíc bonus **0,5 bodu** za každý odehraný zápas v tomto dnu. Bonus může získat více hráčů.
+            * **Bonus za odvahu**
+                * Pokud zvolíte za vítěze zápasu tým, který tipuje méně než 20 % tipujcích, tak při výhře tohoto týmu získáváte navíc bonus **+1 bod**.
+            * **Další bonusy:**
                 * **+6 bodů** pro "Ostrostřelce" (hráč s nejvíce přesnými tipy na konci turnaje).
+                * Pokud si tipneš, že zápas půjde do prodloužení/nájezdů a budeš mít pravdu, získáš **+1 bod**. V opačném případě **1 bod** ztrácíš.
             """)
             st.caption("Made by MiBo | Kontakt: tipovacka.mibo@gmail.com")
 
@@ -772,14 +982,14 @@ def main():
                 st.subheader("🏒 Hokej")
                 history_hockey = [
                     {"Rok": 2025, "Turnaj": "MS - Švédsko/Dánsko", "🥇 1. Místo": "Brácha Tyrdy", "🥈 2. Místo": "Lukáš", "🥉 3. Místo": "Antonín"},
-                    {"Rok": 2024, "Turnaj": "MS - Česko", "🥇 1. Místo": "Luděk / Příbor", "🥈 2. Místo": "-", "🥉 3. Místo": "Tony"},
+                    {"Rok": 2024, "Turnaj": "MS - Česko", "🥇 1. Místo": "Luděk / Příbor", "🥈 2. Místo": "-", "🥉 3. Místo": "Tony B."},
                     {"Rok": 2023, "Turnaj": "MS - Finsko/Lotyšsko", "🥇 1. Místo": "Tyrda", "🥈 2. Místo": "MiBo", "🥉 3. Místo": "Honza K."},
-                    {"Rok": 2022, "Turnaj": "MS - Finsko", "🥇 1. Místo": "Lukáš", "🥈 2. Místo": "Tonda", "🥉 3. Místo": "MiBo"},
+                    {"Rok": 2022, "Turnaj": "MS - Finsko", "🥇 1. Místo": "Lukáš", "🥈 2. Místo": "Tonda V.", "🥉 3. Místo": "MiBo"},
                     {"Rok": 2022, "Turnaj": "ZOH - Čína", "🥇 1. Místo": "Kedárek", "🥈 2. Místo": "MiBo", "🥉 3. Místo": "Kedar"},
                     {"Rok": 2021, "Turnaj": "MS - Lotyšsko", "🥇 1. Místo": "Honza Geryk", "🥈 2. Místo": "Peťa údržbář", "🥉 3. Místo": "Janča"},
                     {"Rok": 2019, "Turnaj": "MS - Slovensko", "🥇 1. Místo": "Lukáš", "🥈 2. Místo": "MiBo", "🥉 3. Místo": "Honza K."},
-                    {"Rok": 2018, "Turnaj": "MS - Dánsko", "🥇 1. Místo": "Dominik", "🥈 2. Místo": "Lukáš", "🥉 3. Místo": "Tonda"},
-                    {"Rok": 2017, "Turnaj": "MS - Němesko/Francie", "🥇 1. Místo": "Lukáš", "🥈 2. Místo": "Tonda", "🥉 3. Místo": "MiBo"},
+                    {"Rok": 2018, "Turnaj": "MS - Dánsko", "🥇 1. Místo": "Dominik", "🥈 2. Místo": "Lukáš", "🥉 3. Místo": "Tonda V."},
+                    {"Rok": 2017, "Turnaj": "MS - Němesko/Francie", "🥇 1. Místo": "Lukáš", "🥈 2. Místo": "Tonda V.", "🥉 3. Místo": "MiBo"},
                     {"Rok": 2016, "Turnaj": "MS - Rusko", "🥇 1. Místo": "Vlasta", "🥈 2. Místo": "Kuba H.", "🥉 3. Místo": "MiBo"},
                 ]
                 df_hist_h = pd.DataFrame(history_hockey)
@@ -789,13 +999,55 @@ def main():
                 st.subheader("⚽ Fotbal")
                 history_football = [
                     {"Rok": 2024, "Turnaj": "EURO - Německo", "🥇 1. Místo": "Brácha Tyrdy", "🥈 2. Místo": "Antonín", "🥉 3. Místo": "Tyrda"},
-                    {"Rok": 2022, "Turnaj": "MS - Katar", "🥇 1. Místo": "Tony", "🥈 2. Místo": "Lukáč", "🥉 3. Místo": "MiBo"},
+                    {"Rok": 2022, "Turnaj": "MS - Katar", "🥇 1. Místo": "Tony B.", "🥈 2. Místo": "Lukáš", "🥉 3. Místo": "MiBo"},
                     {"Rok": 2021, "Turnaj": "EURO - 11 zemí", "🥇 1. Místo": "Dominik", "🥈 2. Místo": "Kedar", "🥉 3. Místo": "Tony B."},
                     {"Rok": 2016, "Turnaj": "EURO - Francie", "🥇 1. Místo": "Vojta H.", "🥈 2. Místo": "Ondra T.", "🥉 3. Místo": "Luděk"},
                 ]
                 df_hist_f = pd.DataFrame(history_football)
                 st.dataframe(df_hist_f.style.set_properties(**{'text-align': 'center'}).set_table_styles([dict(selector='th', props=[('text-align', 'center')])]), use_container_width=True, hide_index=True)
-            
+                st.divider()
+            st.subheader("Pořadí hráčů: Síň slávy")
+            st.markdown("Historická úspěšnost hráčů napříč všemi sporty (seřazeno dle medailí: 🥇 > 🥈 > 🥉).")
+
+            # 1. Agregace dat
+            # Sloučíme oba seznamy do jednoho
+            all_history = history_hockey + history_football
+            medal_stats = {}
+
+            def add_medal(name_raw, type_medal):
+                # Ošetření pro dělená místa (např. "Luděk / Příbor")
+                names = [n.strip() for n in str(name_raw).split('/')]
+                for name in names:
+                    if name in ["-", "", None]: continue
+                    
+                    # Normalizace jmen (volitelné - sjednotí např. "Tony" a "Tony B." pokud chceš, zatím nechávám raw)
+                    key = name
+                    
+                    if key not in medal_stats:
+                        medal_stats[key] = {'🥇 Zlato': 0, '🥈 Stříbro': 0, '🥉 Bronz': 0, 'Celkem': 0}
+                    
+                    medal_stats[key][type_medal] += 1
+                    medal_stats[key]['Celkem'] += 1
+
+            for row in all_history:
+                add_medal(row.get('🥇 1. Místo'), '🥇 Zlato')
+                add_medal(row.get('🥈 2. Místo'), '🥈 Stříbro')
+                add_medal(row.get('🥉 3. Místo'), '🥉 Bronz')
+
+            # 2. Převod na DataFrame
+            if medal_stats:
+                df_hall = pd.DataFrame.from_dict(medal_stats, orient='index').reset_index()
+                df_hall.columns = ['Hráč', '🥇 Zlato', '🥈 Stříbro', '🥉 Bronz', 'Celkem medailí']
+                
+                # 3. Třídění (Olympijský systém: G > S > B)
+                df_hall = df_hall.sort_values(by=['🥇 Zlato', '🥈 Stříbro', '🥉 Bronz'], ascending=False).reset_index(drop=True)
+                df_hall.index += 1 # Pořadí od 1.
+                
+                # Zobrazení
+                st.dataframe(df_hall.style.set_properties(**{'text-align': 'center'}), use_container_width=True)
+            else:
+                st.info("Zatím nejsou data pro výpočet síně slávy.")
+
             me_email = st.session_state.get('user_email', '')
             if "mibo" in me_email.lower():
                  st.info("💡 **Zajímavost:** Hráč **MiBo** má na kontě neuvěřitelných 7 medailí z obou sportů (4x🥈, 3x🥉). To už je skoro prokletí! 😅")    
@@ -839,11 +1091,24 @@ def main():
                     sel_z = st.selectbox("Vyber zápas", z_names)
                     sid = int(sel_z.split(":")[0])
                     with st.form("admin_score"):
-                        c1, c2 = st.columns(2)
-                        d = c1.text_input("Góly D"); h = c2.text_input("Góly H")
+                        # Získáme aktuální data zápasu pro předvyplnění
+                        curr_z = next((x for x in zapasy if x['ID'] == sid), {})
+                        
+                        c1, c2, c3 = st.columns(3)
+                        d = c1.text_input("Góly D", value=curr_z.get('Skore_Domaci', ''))
+                        h = c2.text_input("Góly H", value=curr_z.get('Skore_Hoste', ''))
+                        
+                        # Nové pole pro Prodloužení (čte sloupec H ze sheetu, což je index 8, nebo klíč 'Prodlouzeni')
+                        curr_ot = str(curr_z.get('Prodlouzeni', 'NE')).upper()
+                        # Pokud je prázdné, default NE
+                        ot_val = c3.selectbox("Prodloužení?", ["NE", "ANO"], index=1 if curr_ot == "ANO" else 0)
+
                         if st.form_submit_button("Uložit"):
                             cell = ws_zapasy.find(str(sid))
-                            ws_zapasy.update_cell(cell.row, 5, d); ws_zapasy.update_cell(cell.row, 6, h)
+                            ws_zapasy.update_cell(cell.row, 5, d)
+                            ws_zapasy.update_cell(cell.row, 6, h)
+                            # Uložíme do sloupce H (8. sloupec)
+                            ws_zapasy.update_cell(cell.row, 8, ot_val)
                             st.cache_data.clear(); st.success("OK"); st.rerun()
 
                 # 2. SPRÁVA TURNAJE A UŽIVATELŮ (Vidí POUZE Admin)
@@ -896,5 +1161,4 @@ def main():
     st.markdown('<div class="footer-warning">⚠️ <b>Tip:</b> Pro pohyb v aplikaci používej záložky. Tlačítko Zpět nebo Refresh (F5) tě může odhlásit.</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
-
     main()
