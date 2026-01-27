@@ -8,6 +8,7 @@ import math
 import os
 import hashlib
 import pytz
+import base64
 
 # --- KONFIGURACE A KONSTANTY ---
 st.set_page_config(page_title="Tipovačka - Olympiáda 2026", layout="wide", page_icon="🏆")
@@ -68,6 +69,96 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --- FUNKCE PRO POZADÍ (LED) ---
+def add_bg_from_local(image_file):
+    with open(image_file, "rb") as image_file:
+        encoded_string = base64.b64encode(image_file.read())
+    
+    st.markdown(
+    f"""
+    <style>
+    /* 1. HLAVNÍ POZADÍ */
+    .stApp {{
+        background-image: url(data:image/{"jpg"};base64,{encoded_string.decode()});
+        background-size: cover;
+        background-position: center;
+        background-repeat: no-repeat;
+        background-attachment: fixed;
+    }}
+
+    /* 2. PRŮHLEDNOST BLOKU */
+    div.block-container {{
+        background-color: rgba(255, 255, 255, 0.72); 
+        padding: 3rem;
+        border-radius: 15px;
+        border: 1px solid rgba(255, 255, 255, 0.5);
+        box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+    }}
+    header[data-testid="stHeader"] {{ background-color: transparent; }}
+    .footer-warning {{ background-color: rgba(255, 243, 205, 0.9); color: #856404 !important; border: 1px solid #ffeeba; }}
+
+    /* 3. VSTUPNÍ POLE (MODRÁ) */
+    div[data-baseweb="input"], div[data-baseweb="select"] > div, div[data-testid="stSelectbox"] > div > div {{
+        background-color: #e8f4f8 !important; border: 1px solid #89cff0 !important; color: black !important; border-radius: 5px !important;
+    }}
+    button[data-testid="stNumberInputStepDown"], button[data-testid="stNumberInputStepUp"] {{
+        background-color: #e8f4f8 !important; border: 1px solid #89cff0 !important; color: black !important;
+    }}
+
+    /* 4. CHECKBOXY */
+    div[data-baseweb="checkbox"] div {{ background-color: #e8f4f8 !important; border-color: #007bff !important; }}
+    div[data-baseweb="checkbox"] div[aria-checked="true"] {{ background-color: #007bff !important; border-color: #007bff !important; }}
+    div[data-baseweb="checkbox"] div[aria-checked="true"] svg path {{ stroke: white !important; stroke-width: 3px !important; }}
+    div[data-testid="stCheckbox"] label p {{ color: black !important; font-weight: 700 !important; }}
+
+    /* 5. OTAZNÍK (Tooltip) */
+    div[data-testid="stTooltipIcon"] {{ color: #004085 !important; }}
+    div[data-testid="stTooltipIcon"] svg {{ stroke: #004085 !important; }}
+
+    /* 6. DROPDOWN MENU */
+    ul[data-baseweb="menu"] {{ background-color: #ffffff !important; border: 1px solid #89cff0 !important; }}
+    li[data-baseweb="option"] {{ color: black !important; background-color: #ffffff !important; }}
+    li[data-baseweb="option"]:hover, li[data-baseweb="option"][aria-selected="true"] {{ background-color: #e8f4f8 !important; color: black !important; font-weight: bold; }}
+    
+    /* 7. TEXTY V INPUTECH */
+    input[type="text"], input[type="number"], input[type="password"] {{ color: black !important; font-weight: 500; }}
+
+    /* 8. BOX NEJBLIŽŠÍHO ZÁPASU */
+    .next-match-box {{
+        background-color: rgba(232, 244, 248, 0.95) !important;
+        border-left: 8px solid #007bff !important;
+        border: 1px solid #007bff !important;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3) !important;
+        color: #000 !important; padding: 20px !important;
+    }}
+
+    /* --- NOVÉ ÚPRAVY PRO STATISTIKY --- */
+
+    /* E) CAPTIONS (Popisky pod nadpisy) - Bílá záře místo obdélníku */
+    div[data-testid="stCaptionContainer"] {{
+        color: #000000 !important;       /* Čistá černá */
+        font-weight: 600 !important;     /* Tučnější písmo */
+        font-size: 1rem !important;      /* O něco větší */
+        /* Trik: Bílý stín kolem písmen zajistí čitelnost bez pozadí */
+        text-shadow: 0px 0px 4px rgba(255, 255, 255, 1), 0px 0px 4px rgba(255, 255, 255, 1);
+    }}
+
+    /* H) ALERT BOXY (st.info, st.success, atd.) ve statistikách */
+    /* Uděláme je více bílé (neprůhledné), aby byl text uvnitř čitelný */
+    div[data-testid="stAlert"] {{
+        background-color: rgba(255, 255, 255, 0.9) !important;
+        border: 1px solid #ccc !important;
+        color: #000 !important;
+    }}
+    /* Vynucení černé barvy pro text a ikony uvnitř alert boxů */
+    div[data-testid="stAlert"] p, div[data-testid="stAlert"] svg {{
+        color: #000 !important;
+        fill: #000 !important;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True
+    )
 # --- VLAJKY JAKO OBRÁZKY (ISO KÓDY) ---
 FLAGS_ISO = {
     "Česko": "cz", "Kanada": "ca", "USA": "us", "Švédsko": "se", 
@@ -303,6 +394,9 @@ def get_user_points_at_date(users, tipy, zapasy, date_limit=None):
 
 # --- MAIN APP ---
 def main():
+    if os.path.exists("ice_bg.jpg"):
+        add_bg_from_local("ice_bg.jpg")
+
     col1, col2 = st.columns([1, 4])
     col2.title("NATIPUJ.CZ - hokej - Olympiáda 2026")
 
@@ -680,7 +774,7 @@ def main():
                         st.info(f"Výsledek: {z['Skore_Domaci']}:{z['Skore_Hoste']} | Tvůj tip: {mt.get('Tip_Domaci','-')}:{mt.get('Tip_Hoste','-')} | **{p}b** {ot_txt}")
                     else:
                         c1, c2, c3 = st.columns([1,1,3])
-                        # Načtení starých hodnot (TEĎ UŽ TO BUDE FUNGOVAT)
+                        # Načtení starých hodnot
                         old_d = mt.get('Tip_Domaci', 0)
                         old_h = mt.get('Tip_Hoste', 0)
                         old_ot = mt.get('Tip_Prodlouzeni', '') 
@@ -693,11 +787,21 @@ def main():
                         is_checked = (str(old_ot).upper() == "ANO")
                         v_ot = c3.checkbox("Bude se prodlužovat?", value=is_checked, key=f"ot_{zid}", help="Zaškrtni, pokud věříš, že zápas půjde do prodloužení.")
                         
-                        # Varování, pokud to nedává smysl
+                        # === ZMĚNA ZDE: Používáme HTML pro barvy a stín (aby to bylo vidět na ledu) ===
                         if v_ot and abs(v_d - v_h) != 1:
-                            c3.caption("⚠️ Tip na prodloužení se neuloží (rozdíl není 1 gól).")
+                            # ČERVENÁ VAROVNÁ
+                            c3.markdown("""
+                            <div style='color: #d9534f; font-weight: bold; text-shadow: 1px 1px 0 #fff, -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff;'>
+                                ⚠️ Tip na prodloužení se neuloží (rozdíl není 1 gól).
+                            </div>
+                            """, unsafe_allow_html=True)
                         elif v_ot:
-                            c3.caption("✅ Tip na prodloužení aktivní.")
+                            # ZELENÁ AKTIVNÍ
+                            c3.markdown("""
+                            <div style='color: #28a745; font-weight: bold; text-shadow: 1px 1px 0 #fff, -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff;'>
+                                ✅ Tip na prodloužení aktivní.
+                            </div>
+                            """, unsafe_allow_html=True)
                             
                         # Ukládáme trojici (D, H, OT)
                         tips_to_save[zid] = (v_d, v_h, "ANO" if v_ot else "")
@@ -710,6 +814,8 @@ def main():
         # 2. PŘEHLED
         with t_overview:
             st.header("Globální přehled tipů")
+            
+            # A) TABULKA ZÁPASŮ (To co tam bylo doteď)
             if not finished_matches: st.info("Zatím žádné odehrané zápasy.")
             else:
                 data = []; tips_map = {(str(t['Email']), t['Zapas_ID']): t for t in tipy}
@@ -720,12 +826,11 @@ def main():
                         "Fáze": faze, 
                         "Výsledek": f"{z['Skore_Domaci']}:{z['Skore_Hoste']}"
                     }
-                    if str(z.get('Prodlouzeni','')) == 'ANO': row["Výsledek"] += " pp"
+                    if str(z.get('Prodlouzeni','')) == 'ANO': row["Výsledek"] += " (OT)"
 
                     for u in users:
                         t = tips_map.get((str(u['Email']), z['ID']))
                         if t:
-                            # OPRAVA ZDE: Přebíráme 4 hodnoty (p, ie, _, ot)
                             p, ie, _, _ = spocitej_body_zapas(
                                 t['Tip_Domaci'], t['Tip_Hoste'], 
                                 z['Skore_Domaci'], z['Skore_Hoste'], 
@@ -740,6 +845,54 @@ def main():
                         row[u['Jmeno']] = txt
                     data.append(row)
                 st.dataframe(pd.DataFrame(data).style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
+
+            # B) NOVINKA: TABULKA DLOUHODOBÝCH SÁZEK (Zobrazí se jen po uzavření turnaje)
+            # Kontrolujeme, zda je v nastavení vyplněn vítěz turnaje
+            if OFFICIAL_RESULTS.get('winner'):
+                st.divider()
+                st.subheader("🏆 Vyhodnocení dlouhodobých sázek")
+                st.caption("Detailní rozpis bodů za tipy na vítěze a medailisty.")
+                
+                long_term_data = []
+                real_winner = str(OFFICIAL_RESULTS['winner'])
+                real_medals = [str(m) for m in OFFICIAL_RESULTS['medals'] if m]
+
+                for u in users:
+                    # Načtení tipů uživatele
+                    t_w = str(u.get('Tip_Vitez', '-'))
+                    t_m1 = str(u.get('Tip_Med1', '-'))
+                    t_m2 = str(u.get('Tip_Med2', '-'))
+                    t_m3 = str(u.get('Tip_Med3', '-'))
+                    
+                    # Výpočet bodů pro zobrazení
+                    pts_w = 15 if t_w == real_winner and real_winner else 0
+                    
+                    # Logika pro medaile (4 body, pokud je tým v reálných medailistech)
+                    # Používáme set() pro unikátní tipy, stejně jako v hlavní kalkulačce, aby si někdo nenatipoval 3x Kanadu
+                    user_medal_tips = [t_m1, t_m2, t_m3]
+                    
+                    # Pomocná funkce pro zobrazení bodů u medaile
+                    def get_medal_display(tip_val):
+                        if tip_val in real_medals:
+                            return f"{tip_val} (4b)"
+                        return f"{tip_val} (0b)"
+
+                    # Sestavení řádku
+                    lt_row = {
+                        "Hráč": u['Jmeno'],
+                        "Tip Vítěz": f"{t_w} ({pts_w}b)" if t_w != '-' else "-",
+                        "Medaile 1": get_medal_display(t_m1),
+                        "Medaile 2": get_medal_display(t_m2),
+                        "Medaile 3": get_medal_display(t_m3),
+                        "Celkem LT": spocitej_dlouhodobe_body(u, OFFICIAL_RESULTS) # Kontrolní součet
+                    }
+                    long_term_data.append(lt_row)
+
+                if long_term_data:
+                    df_lt = pd.DataFrame(long_term_data)
+                    # Zvýrazníme vítěze (seřadíme podle bodů)
+                    df_lt = df_lt.sort_values("Celkem LT", ascending=False)
+                    st.dataframe(df_lt.style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
 
         # 3. DLOUHODOBÉ
         with t_long:
@@ -1228,9 +1381,9 @@ def main():
                             st.write(f"Stav: **{str(users[u_idx].get('Zaplaceno', 'NE'))}**")
                             c_p1, c_p2 = st.columns(2)
                             if c_p1.button("✅ Zaplaceno"):
-                                ws_users.update_cell(u_idx+2, 12, "ANO"); st.cache_data.clear(); st.success("OK"); time.sleep(0.5); st.rerun()
+                                ws_users.update_cell(u_idx+2, 11, "ANO"); st.cache_data.clear(); st.success("OK"); time.sleep(0.5); st.rerun()
                             if c_p2.button("❌ Nezaplaceno"):
-                                ws_users.update_cell(u_idx+2, 12, "NE"); st.cache_data.clear(); st.success("OK"); time.sleep(0.5); st.rerun()
+                                ws_users.update_cell(u_idx+2, 11, "NE"); st.cache_data.clear(); st.success("OK"); time.sleep(0.5); st.rerun()
 
 
     # PATIČKA
