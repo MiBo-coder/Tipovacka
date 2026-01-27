@@ -619,8 +619,27 @@ def main():
                 df_rank.at[idx, 'Vývoj pořadí'] = "🆕"
 
         # ZÁLOŽKY
-        tabs = st.tabs(["🏒 Tipování", "🕵️ Přehled", "🏆 Medaile", "🥇 Žebříček", "🎯 Statistiky", "⚙️ Profil", "📜 Pravidla", "🏛️ Historické výsledky", "💰 Startovné a výhry"])
-        t_matches, t_overview, t_long, t_rank, t_stats, t_prof, t_rules, t_history, t_bank = tabs
+        tab_names = [
+            "🏒 Tipování", "🕵️ Přehled", "🏆 Medaile", "🥇 Žebříček", 
+            "🎯 Statistiky", "⚙️ Profil", "📜 Pravidla", 
+            "🏛️ Historické výsledky", "💰 Startovné a výhry"
+        ]
+        
+        # 2. Zjištění role a přidání Admin záložky
+        user_role = st.session_state.get('user_role')
+        is_admin = user_role in ['admin', 'moderator']
+        
+        if is_admin:
+            tab_names.append("🛠️ Admin")
+
+        # 3. Vytvoření záložek
+        all_tabs = st.tabs(tab_names)
+
+        # 4. Rozbalení standardních záložek (prvních 9)
+        t_matches, t_overview, t_long, t_rank, t_stats, t_prof, t_rules, t_history, t_bank = all_tabs[:9]
+        
+        # 5. Admin záložka (pokud existuje, je poslední)
+        t_admin = all_tabs[9] if is_admin else None
 
         # 1. TIPOVÁNÍ
         with t_matches:
@@ -688,7 +707,6 @@ def main():
                         save_tips_batch(ws_tipy, st.session_state['user_email'], tips_to_save, tipy)
                         st.success("Uloženo!"); time.sleep(1); st.rerun()
 
-        # 2. PŘEHLED
         # 2. PŘEHLED
         with t_overview:
             st.header("Globální přehled tipů")
@@ -1145,80 +1163,75 @@ def main():
                 st.write(f"🥉 **3. Místo:** {int(bank_total * 0.1)} Kč")
 
         # --- ADMIN & MODERATOR PANEL ---
-        user_role = st.session_state.get('user_role')
-        if user_role in ['admin', 'moderator']:
-            with st.sidebar:
+        if is_admin and t_admin:
+            with t_admin:
                 st.header(f"Panel: {user_role.capitalize()}")
                 
-                # 1. ZADÁVÁNÍ VÝSLEDKŮ (Vidí Admin i Moderator)
+                # 1. ZADÁVÁNÍ VÝSLEDKŮ
                 with st.expander("Výsledky zápasů", expanded=True):
                     z_names = [f"{z['ID']}: {z['Domaci']} vs {z['Hoste']}" for z in zapasy]
                     sel_z = st.selectbox("Vyber zápas", z_names)
                     sid = int(sel_z.split(":")[0])
                     with st.form("admin_score"):
-                        # Získáme aktuální data zápasu pro předvyplnění
                         curr_z = next((x for x in zapasy if x['ID'] == sid), {})
                         
+                        # Tady máme plnou šířku, takže 3 sloupce budou vypadat skvěle
                         c1, c2, c3 = st.columns(3)
-                        d = c1.text_input("Góly D", value=curr_z.get('Skore_Domaci', ''))
-                        h = c2.text_input("Góly H", value=curr_z.get('Skore_Hoste', ''))
+                        d = c1.text_input("Góly Domácí", value=curr_z.get('Skore_Domaci', ''))
+                        h = c2.text_input("Góly Hosté", value=curr_z.get('Skore_Hoste', ''))
                         
-                        # Nové pole pro Prodloužení (čte sloupec H ze sheetu, což je index 8, nebo klíč 'Prodlouzeni')
                         curr_ot = str(curr_z.get('Prodlouzeni', 'NE')).upper()
-                        # Pokud je prázdné, default NE
                         ot_val = c3.selectbox("Prodloužení?", ["NE", "ANO"], index=1 if curr_ot == "ANO" else 0, key=f"admin_ot_{sid}")
 
-                        if st.form_submit_button("Uložit"):
+                        if st.form_submit_button("💾 Uložit výsledek"):
                             try:
-                                # BEZPEČNÁ METODA: Načteme sloupec ID a najdeme řádek přesně
-                                all_ids = ws_zapasy.col_values(1) # Načte sloupec A jako seznam
+                                all_ids = ws_zapasy.col_values(1) 
                                 search_id = str(sid)
-                                
                                 if search_id in all_ids:
-                                    # Najdeme index (pořadí) v seznamu a přičteme 1 (protože řádky jsou od 1)
                                     row_idx = all_ids.index(search_id) + 1
-                                    
-                                    # Zápis dat
                                     ws_zapasy.update_cell(row_idx, 5, d)
                                     ws_zapasy.update_cell(row_idx, 6, h)
                                     ws_zapasy.update_cell(row_idx, 8, ot_val)
-                                    
-                                    st.cache_data.clear()
-                                    st.success(f"✅ Výsledek zápasu {sid} (řádek {row_idx}) uložen!")
-                                    time.sleep(1)
-                                    st.rerun()
+                                    st.cache_data.clear(); st.success(f"✅ Výsledek zápasu {sid} uložen!"); time.sleep(1); st.rerun()
                                 else:
-                                    st.error(f"❌ Chyba: ID zápasu '{sid}' nebylo v tabulce nalezeno.")
-                            except Exception as e:
-                                st.error(f"Chyba při komunikaci s Google Sheetem: {e}")
+                                    st.error(f"❌ Chyba: ID zápasu '{sid}' nenalezeno.")
+                            except Exception as e: st.error(f"Chyba: {e}")
 
-                # 2. SPRÁVA TURNAJE A UŽIVATELŮ (Vidí POUZE Admin)
+                # 2. POUZE PRO HLAVNÍHO ADMINA
                 if user_role == 'admin':
-                    with st.expander("Konec turnaje"):
-                        with st.form("af"):
-                            ht = get_all_teams(zapasy)
-                            def get_idx(val): return ht.index(val) if val in ht else 0
-                            w = st.selectbox("Vítěz", ht, index=get_idx(config.get('vitez_turnaje', '')))
-                            m1 = st.selectbox("Medaile 1", ht, index=get_idx(config.get('med_1', '')))
-                            m2 = st.selectbox("Medaile 2", ht, index=get_idx(config.get('med_2', '')))
-                            m3 = st.selectbox("Medaile 3", ht, index=get_idx(config.get('med_3', '')))
-                            if st.form_submit_button("Uzavřít turnaj"):
-                                def upd(k, v):
-                                    c = ws_nastaveni.find(k)
-                                    if c: ws_nastaveni.update_cell(c.row, 2, v)
-                                    else: ws_nastaveni.append_row([k, v])
-                                upd('vitez_turnaje', w); upd('med_1', m1); upd('med_2', m2); upd('med_3', m3)
-                                st.cache_data.clear(); st.success("Turnaj uzavřen!"); st.rerun()
+                    col_ad1, col_ad2 = st.columns(2)
                     
-                    with st.expander("Platby"):
-                        users_list = [f"{u['Jmeno']} ({u['Email']})" for u in users]
-                        sel_user_pay = st.selectbox("Vyber uživatele", users_list)
-                        sel_email = sel_user_pay.split(" (")[-1].replace(")", "")
-                        u_idx = next((i for i, u in enumerate(users) if str(u['Email']) == sel_email), 0)
-                        curr = str(users[u_idx].get('Zaplaceno', 'NE'))
-                        new_s = st.radio("Stav", ["ANO", "NE"], index=0 if curr=="ANO" else 1)
-                        if st.button("Změnit stav"):
-                            ws_users.update_cell(u_idx+2, 12, new_s); st.cache_data.clear(); st.success("Změněno"); st.rerun()
+                    with col_ad1:
+                        with st.expander("Konec turnaje"):
+                            with st.form("af"):
+                                ht = get_all_teams(zapasy)
+                                def get_idx(val): return ht.index(val) if val in ht else 0
+                                w = st.selectbox("Vítěz", ht, index=get_idx(config.get('vitez_turnaje', '')))
+                                m1 = st.selectbox("Medaile 1", ht, index=get_idx(config.get('med_1', '')))
+                                m2 = st.selectbox("Medaile 2", ht, index=get_idx(config.get('med_2', '')))
+                                m3 = st.selectbox("Medaile 3", ht, index=get_idx(config.get('med_3', '')))
+                                if st.form_submit_button("Uzavřít turnaj"):
+                                    def upd(k, v):
+                                        c = ws_nastaveni.find(k)
+                                        if c: ws_nastaveni.update_cell(c.row, 2, v)
+                                        else: ws_nastaveni.append_row([k, v])
+                                    upd('vitez_turnaje', w); upd('med_1', m1); upd('med_2', m2); upd('med_3', m3)
+                                    st.cache_data.clear(); st.success("Turnaj uzavřen!"); st.rerun()
+
+                    with col_ad2:
+                        with st.expander("Správa plateb"):
+                            users_list = [f"{u['Jmeno']} ({u['Email']})" for u in users]
+                            sel_user_pay = st.selectbox("Vyber uživatele", users_list)
+                            sel_email = sel_user_pay.split(" (")[-1].replace(")", "")
+                            u_idx = next((i for i, u in enumerate(users) if str(u['Email']) == sel_email), 0)
+                            
+                            st.write(f"Stav: **{str(users[u_idx].get('Zaplaceno', 'NE'))}**")
+                            c_p1, c_p2 = st.columns(2)
+                            if c_p1.button("✅ Zaplaceno"):
+                                ws_users.update_cell(u_idx+2, 12, "ANO"); st.cache_data.clear(); st.success("OK"); time.sleep(0.5); st.rerun()
+                            if c_p2.button("❌ Nezaplaceno"):
+                                ws_users.update_cell(u_idx+2, 12, "NE"); st.cache_data.clear(); st.success("OK"); time.sleep(0.5); st.rerun()
+
 
     # PATIČKA
     st.markdown('<div class="footer-warning">⚠️ <b>Tip:</b> Pro pohyb v aplikaci používej záložky. Tlačítko Zpět nebo Refresh (F5) tě může odhlásit.</div>', unsafe_allow_html=True)
