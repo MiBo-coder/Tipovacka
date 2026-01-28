@@ -155,6 +155,10 @@ def add_bg_from_local(image_file):
         color: #000 !important;
         fill: #000 !important;
     }}
+    /* 9. ZAROVNÁNÍ NADPISŮ NA STŘED */
+    .stApp h1, .stApp h2, .stApp h3 {{
+        text-align: center !important;
+    }}
     </style>
     """,
     unsafe_allow_html=True
@@ -471,8 +475,8 @@ def main():
                 st.info("Bohužel už není možné se automaticky zaregistrovat. Pokud máš pocit, že se jedná o chybu, nebo máš protekci, napiš na **tipovacka.mibo@gmail.com**.")
             else:
                 with st.form("reg_form"):
-                    r_email = st.text_input("Email")
-                    r_name = st.text_input("Jméno")
+                    r_email = st.text_input("Email (slouží k přihlašování)")
+                    r_name = st.text_input("Jméno (pod tímto jménem budete ve hře vystupovat - nelze)")
                     r_pass = st.text_input("Heslo", type="password")
                     r_pass2 = st.text_input("Kontrola hesla", type="password")
                     
@@ -792,7 +796,7 @@ def main():
                             # ČERVENÁ VAROVNÁ
                             c3.markdown("""
                             <div style='color: #d9534f; font-weight: bold; text-shadow: 1px 1px 0 #fff, -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff;'>
-                                ⚠️ Tip na prodloužení se neuloží (rozdíl není 1 gól).
+                                ⚠️ Tip na prodloužení se neuložil (rozdíl není 1 gól).
                             </div>
                             """, unsafe_allow_html=True)
                         elif v_ot:
@@ -815,21 +819,38 @@ def main():
         with t_overview:
             st.header("Globální přehled tipů")
             
-            # A) TABULKA ZÁPASŮ (To co tam bylo doteď)
-            if not finished_matches: st.info("Zatím žádné odehrané zápasy.")
+            # Příprava dat
+            rank_map = df_rank.set_index('Email')['Poradi'].to_dict()
+            my_email = st.session_state.get('user_email', '')
+
+            # 1. SEŘAZENÍ HRÁČŮ (JÁ PRVNÍ, PAK OSTATNÍ)
+            # Vytvoříme seznam uživatelů, kde vy jste na indexu 0
+            sorted_users = sorted(users, key=lambda u: 0 if str(u['Email']) == my_email else 1)
+
+            # A) TABULKA ZÁPASŮ
+            if not finished_matches: 
+                st.info("Zatím žádné odehrané zápasy.")
             else:
-                data = []; tips_map = {(str(t['Email']), t['Zapas_ID']): t for t in tipy}
+                data = []
+                tips_map = {(str(t['Email']), t['Zapas_ID']): t for t in tipy}
+                
+                # --- I. PŘÍPRAVA DAT (ŘÁDKY) ---
                 for z in finished_matches:
                     faze = z.get('Faze', '')
+                    # Základní data řádku (klíče musí odpovídat sloupcům níže)
                     row = {
                         "Zápas": f"{z['Domaci']} - {z['Hoste']}", 
                         "Fáze": faze, 
                         "Výsledek": f"{z['Skore_Domaci']}:{z['Skore_Hoste']}"
                     }
-                    if str(z.get('Prodlouzeni','')) == 'ANO': row["Výsledek"] += " (OT)"
+                    if str(z.get('Prodlouzeni','')) == 'ANO': 
+                        row["Výsledek"] += " (OT)"
 
-                    for u in users:
-                        t = tips_map.get((str(u['Email']), z['ID']))
+                    # Přidání bodů jednotlivých hráčů
+                    for u in sorted_users:
+                        email = str(u['Email'])
+                        t = tips_map.get((email, z['ID']))
+                        
                         if t:
                             p, ie, _, _ = spocitej_body_zapas(
                                 t['Tip_Domaci'], t['Tip_Hoste'], 
@@ -837,17 +858,58 @@ def main():
                                 z['Domaci'], z['Hoste'], z.get('Faze',''),
                                 t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
                             )
+                            # Formát buňky: "2:1 (OT) (3b)"
                             txt = f"{t['Tip_Domaci']}:{t['Tip_Hoste']}"
                             if str(t.get('Tip_Prodlouzeni','')) == 'ANO': txt += " (OT)"
-                            txt += f" ({p}b)"
+                            txt += f" ({p} b.)"
                             if ie: txt = f"⭐ {txt}"
-                        else: txt = "-"
-                        row[u['Jmeno']] = txt
+                        else: 
+                            txt = "-"
+                        
+                        # Klíčem v datech je email (unikátní), později ho přemapujeme na MultiIndex
+                        row[email] = txt
                     data.append(row)
-                st.dataframe(pd.DataFrame(data).style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
+                
+                # --- II. VYTVOŘENÍ DATAFRAME A MULTIINDEX HLAVIČKY ---
+                # Definujeme pořadí sloupců v DF: Info sloupce + Seřazení uživatelé
+                cols_order = ['Zápas', 'Fáze', 'Výsledek'] + [str(u['Email']) for u in sorted_users]
+                df_ov = pd.DataFrame(data, columns=cols_order)
 
-            # B) NOVINKA: TABULKA DLOUHODOBÝCH SÁZEK (Zobrazí se jen po uzavření turnaje)
-            # Kontrolujeme, zda je v nastavení vyplněn vítěz turnaje
+                # Vytvoření dvouřádkové hlavičky (MultiIndex)
+                # 1. úroveň = Jméno (nebo název sloupce)
+                # 2. úroveň = Statistiky (nebo prázdné)
+                header_tuples = []
+                
+                # Pro info sloupce necháme druhý řádek prázdný
+                top_header = "📝 INFO O ZÁPASE"
+                header_tuples.append((top_header, 'Soupeři'))
+                header_tuples.append((top_header, 'Fáze'))
+                header_tuples.append((top_header, 'Výsledek'))
+                
+                # Pro uživatele vytvoříme patrovou hlavičku
+                for u in sorted_users:
+                    email = str(u['Email'])
+                    u_rank = rank_map.get(email, '-')
+                    u_points = total_points.get(email, 0)
+                    
+                    # Horní řádek: Jméno
+                    top_label = u['Jmeno']
+                    # Spodní řádek: Pořadí a body
+                    bottom_label = f"{u_rank}. místo ({u_points} b.)"
+                    
+                    header_tuples.append((top_label, bottom_label))
+
+                # Aplikace MultiIndexu na sloupce
+                df_ov.columns = pd.MultiIndex.from_tuples(header_tuples)
+
+                # Vykreslení
+                st.dataframe(
+                    df_ov.style.set_properties(**{'text-align': 'center'}), 
+                    use_container_width=True, 
+                    hide_index=True
+                )
+
+            # B) TABULKA DLOUHODOBÝCH SÁZEK
             if OFFICIAL_RESULTS.get('winner'):
                 st.divider()
                 st.subheader("🏆 Vyhodnocení dlouhodobých sázek")
@@ -857,42 +919,48 @@ def main():
                 real_winner = str(OFFICIAL_RESULTS['winner'])
                 real_medals = [str(m) for m in OFFICIAL_RESULTS['medals'] if m]
 
+                # Zde řadíme podle bodů (vítěz nahoře), ale můžeme použít sorted_users, pokud chcete sebe nahoře i tady.
+                # Necháme standardní řazení podle úspěchu v LT.
+                
                 for u in users:
-                    # Načtení tipů uživatele
                     t_w = str(u.get('Tip_Vitez', '-'))
                     t_m1 = str(u.get('Tip_Med1', '-'))
                     t_m2 = str(u.get('Tip_Med2', '-'))
                     t_m3 = str(u.get('Tip_Med3', '-'))
                     
-                    # Výpočet bodů pro zobrazení
                     pts_w = 15 if t_w == real_winner and real_winner else 0
                     
-                    # Logika pro medaile (4 body, pokud je tým v reálných medailistech)
-                    # Používáme set() pro unikátní tipy, stejně jako v hlavní kalkulačce, aby si někdo nenatipoval 3x Kanadu
-                    user_medal_tips = [t_m1, t_m2, t_m3]
-                    
-                    # Pomocná funkce pro zobrazení bodů u medaile
                     def get_medal_display(tip_val):
-                        if tip_val in real_medals:
-                            return f"{tip_val} (4b)"
-                        return f"{tip_val} (0b)"
+                        if tip_val in real_medals: return f"{tip_val} (4 b.)"
+                        return f"{tip_val} (0 b.)"
 
-                    # Sestavení řádku
+                    # Statistiky
+                    u_rank = rank_map.get(str(u['Email']), '-')
+                    u_points = total_points.get(str(u['Email']), 0)
+                    
+                    # Tady jsme v buňce (data), takže \n funguje, pokud zapneme 'white-space: pre-wrap'
+                    player_label = f"{u['Jmeno']}\n{u_rank}. místo ({u_points} b.)"
+
                     lt_row = {
-                        "Hráč": u['Jmeno'],
-                        "Tip Vítěz": f"{t_w} ({pts_w}b)" if t_w != '-' else "-",
+                        "Hráč": player_label,
+                        "Tip Vítěz": f"{t_w} ({pts_w} b.)" if t_w != '-' else "-",
                         "Medaile 1": get_medal_display(t_m1),
                         "Medaile 2": get_medal_display(t_m2),
                         "Medaile 3": get_medal_display(t_m3),
-                        "Celkem LT": spocitej_dlouhodobe_body(u, OFFICIAL_RESULTS) # Kontrolní součet
+                        "Celkem LT": spocitej_dlouhodobe_body(u, OFFICIAL_RESULTS)
                     }
                     long_term_data.append(lt_row)
 
                 if long_term_data:
                     df_lt = pd.DataFrame(long_term_data)
-                    # Zvýrazníme vítěze (seřadíme podle bodů)
                     df_lt = df_lt.sort_values("Celkem LT", ascending=False)
-                    st.dataframe(df_lt.style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
+                    
+                    # Zde musíme povolit zalamování řádků (pre-wrap) pro sloupec "Hráč"
+                    st.dataframe(
+                        df_lt.style.set_properties(**{'text-align': 'center', 'white-space': 'pre-wrap'}), 
+                        use_container_width=True, 
+                        hide_index=True
+                    )
 
         # 3. DLOUHODOBÉ
         with t_long:
@@ -1241,7 +1309,6 @@ def main():
                 ]
                 df_hist_f = pd.DataFrame(history_football)
                 st.dataframe(df_hist_f.style.set_properties(**{'text-align': 'center'}).set_table_styles([dict(selector='th', props=[('text-align', 'center')])]), use_container_width=True, hide_index=True)
-                st.divider()
             st.subheader("Pořadí hráčů")
             st.markdown("Historická úspěšnost hráčů napříč všemi turnaji (seřazeno dle medailí: 🥇 > 🥈 > 🥉).")
 
