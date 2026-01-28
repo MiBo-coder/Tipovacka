@@ -155,9 +155,12 @@ def add_bg_from_local(image_file):
         color: #000 !important;
         fill: #000 !important;
     }}
-    /* 9. ZAROVNÁNÍ NADPISŮ NA STŘED */
-    .stApp h1, .stApp h2, .stApp h3 {{
+
+    .stApp h1 {{
         text-align: center !important;
+    }}
+    .stApp h2, .stApp h3 {{
+        text-align: left !important;
     }}
     </style>
     """,
