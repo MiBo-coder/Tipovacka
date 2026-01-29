@@ -479,7 +479,7 @@ def main():
             else:
                 with st.form("reg_form"):
                     r_email = st.text_input("Email (slouží k přihlašování)")
-                    r_name = st.text_input("Jméno (pod tímto jménem budete ve hře vystupovat - nelze)")
+                    r_name = st.text_input("Jméno (pod tímto jménem budete ve hře vystupovat - nelze měnit v průběhu hry)")
                     r_pass = st.text_input("Heslo", type="password")
                     r_pass2 = st.text_input("Kontrola hesla", type="password")
                     
@@ -1460,4 +1460,5 @@ def main():
     st.markdown('<div class="footer-warning">⚠️ <b>Tip:</b> Pro pohyb v aplikaci používej záložky. Tlačítko Zpět nebo Refresh (F5) tě může odhlásit.</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
+
     main()
