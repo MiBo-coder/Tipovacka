@@ -217,7 +217,6 @@ def get_gspread_client():
 def get_worksheets_resources():
     """
     Otevře Spreadsheet a vrátí objekty Worksheetů.
-    Toto se provede jen JEDNOU při startu, ne při každém kliknutí -> ŠETŘÍ API.
     """
     client = get_gspread_client()
     sh = client.open("Tipovacka_Data")
@@ -227,12 +226,14 @@ def get_worksheets_resources():
     ws_users = sh.worksheet("Uzivatele")
     
     # Bezpečné načtení Nastavení
-    try:
-        ws_nastaveni = sh.worksheet("Nastaveni")
-    except gspread.WorksheetNotFound:
-        ws_nastaveni = None
+    try: ws_nastaveni = sh.worksheet("Nastaveni")
+    except gspread.WorksheetNotFound: ws_nastaveni = None
+    
+    # NOVÉ: Načtení chatu
+    try: ws_chat = sh.worksheet("Chat")
+    except gspread.WorksheetNotFound: ws_chat = sh.add_worksheet(title="Chat", rows=1000, cols=4)
         
-    return ws_zapasy, ws_tipy, ws_users, ws_nastaveni
+    return ws_zapasy, ws_tipy, ws_users, ws_nastaveni, ws_chat
 
 # --- POMOCNÉ FUNKCE (LOGIKA) ---
 def parse_date(date_str):
@@ -368,14 +369,15 @@ def spocitej_dlouhodobe_body(user_row, official_results):
 # --- DATA LOADING (CACHED VALUES) ---
 @st.cache_data(ttl=60) 
 def load_data_values():
-    ws_zapasy, ws_tipy, ws_users, ws_nastaveni = get_worksheets_resources()
+    ws_zapasy, ws_tipy, ws_users, ws_nastaveni, ws_chat = get_worksheets_resources() # Upraveno
     zapasy_raw = ws_zapasy.get_all_records()
     for z in zapasy_raw:
         z['Datum_Obj'] = parse_date(z['Datum'])
     tipy = ws_tipy.get_all_records()
     users = ws_users.get_all_records()
     nastaveni = ws_nastaveni.get_all_records() if ws_nastaveni else []
-    return zapasy_raw, tipy, users, nastaveni
+    chat_data = ws_chat.get_all_records() # Nové
+    return zapasy_raw, tipy, users, nastaveni, chat_data
 
 # --- CALC RANKING (PRO TRENDY) ---
 def get_user_points_at_date(users, tipy, zapasy, date_limit=None):
@@ -411,8 +413,8 @@ def main():
         st.session_state['logged_in'] = False
 
     try:
-        zapasy, tipy, users, nastaveni_data = load_data_values()
-        ws_zapasy, ws_tipy, ws_users, ws_nastaveni = get_worksheets_resources()
+        zapasy, tipy, users, nastaveni_data, chat_data = load_data_values() # Přidáno chat_data
+        ws_zapasy, ws_tipy, ws_users, ws_nastaveni, ws_chat = get_worksheets_resources() # Přidáno ws_chat
     except Exception as e:
         st.error(f"Chyba databáze (zkus chvíli počkat a refresh): {e}"); st.stop()
 
@@ -443,7 +445,11 @@ def main():
                         
                         if not u.empty and check_password(password, u.iloc[0]['Heslo']):
                             st.session_state['logged_in'] = True; st.session_state['user_email'] = str(u.iloc[0]['Email']); st.session_state['user_name'] = u.iloc[0]['Jmeno']; st.session_state['user_team'] = u.iloc[0].get('Tym', ''); st.session_state['user_role'] = u.iloc[0]['Role']; st.rerun()
-                        else: st.error("Chyba přihlášení. Zkontroluj email a heslo.")
+                        else:
+                            # OCHRANA PROTI BRUTE FORCE
+                            # Umělé zpoždění 3 sekundy. Útočníka to extrémně zpomalí.
+                            time.sleep(3) 
+                            st.error("Chyba přihlášení. Zkontroluj email a heslo.")
 
             
             # --- SEKCE RESET HESLA (To, co jsme přidali minule) ---
@@ -479,7 +485,7 @@ def main():
             else:
                 with st.form("reg_form"):
                     r_email = st.text_input("Email (slouží k přihlašování)")
-                    r_name = st.text_input("Jméno (pod tímto jménem budete ve hře vystupovat - nelze měnit v průběhu hry)")
+                    r_name = st.text_input("Jméno/Přezdívka (pod tímto jménem budete ve hře uvedeni - nelze měnit v průběhu hry)")
                     r_pass = st.text_input("Heslo", type="password")
                     r_pass2 = st.text_input("Kontrola hesla", type="password")
                     
@@ -495,9 +501,14 @@ def main():
                         elif r_pass != r_pass2: st.error("Hesla se neshodují!")
                         else:
                             hashed_pw = make_hash(r_pass)
+                            
+                            # --- VÝPOČET NOVÉHO ID ---
+                            # Získáme všechna existující ID, ignorujeme prázdné nebo nečíselné hodnoty
+                            existing_ids = [int(u.get('ID')) for u in users if str(u.get('ID', '')).isdigit()]
+                            new_id = max(existing_ids) + 1 if existing_ids else 1
+                            
                             # Default role 'user'
-                            # UPRAVENO: Přidány prázdné stringy pro sloupce L a M, a 'ANO' pro N (Notifikace)
-                            ws_users.append_row([r_email, r_name, hashed_pw, 0, 'user', '', '', '', '', '', 'NE', '', '', 'ANO'])
+                            ws_users.append_row([r_email, r_name, hashed_pw, 0, 'user', '', '', '', '', '', 'NE', '', '', 'ANO', new_id])
                             st.cache_data.clear()
                             st.success("Registrace úspěšná! Přihlašuji...")
                             
@@ -512,7 +523,11 @@ def main():
     # --- APP (PŘIHLÁŠEN) ---
     else:
         c1, c2, c3 = st.columns([3, 4, 1])
-        c1.write(f"👤 **{st.session_state['user_name']}**")
+        
+        curr_u = next((u for u in users if str(u['Email']) == st.session_state['user_email']), {})
+        curr_id = curr_u.get('ID', '?')
+        
+        c1.write(f"👤 **{st.session_state['user_name']}** (ID: {curr_id})")
         c1.caption(f"Tým: {st.session_state.get('user_team') or '-'}")
         if c3.button("Odhlásit"): st.session_state['logged_in'] = False; st.rerun()
         st.divider()
@@ -687,12 +702,11 @@ def main():
                 "Tým": u.get('Tym', '-'), 
                 "Zaplaceno": str(u.get('Zaplaceno', 'NE')).upper(), 
                 "Body Zápasy": match_points.get(e,0), 
-                "Body Bonusy": long_term_points.get(e,0), 
+                "Bonusy": long_term_points.get(e,0), 
                 "Celkem": total_points.get(e,0)
             })
         df_rank = pd.DataFrame(rd).sort_values("Celkem", ascending=False).reset_index(drop=True)
-        df_rank.index += 1
-        df_rank['Poradi'] = df_rank.index
+        df_rank['Pořadí'] = df_rank['Celkem'].rank(method='min', ascending=False).astype(int)
 
         # Trendy
         prague_tz = pytz.timezone('Europe/Prague')  # 1. Musíme znát zónu
@@ -705,25 +719,30 @@ def main():
             rd_prev.append({"Email": e, "Total": b_prev})
         df_prev = pd.DataFrame(rd_prev).sort_values("Total", ascending=False).reset_index(drop=True)
         df_prev.index += 1
-        df_prev['Poradi'] = df_prev.index
-        prev_ranks = df_prev.set_index('Email')['Poradi'].to_dict()
+        df_prev['Pořadí'] = df_prev.index
+        prev_ranks = df_prev.set_index('Email')['Pořadí'].to_dict()
 
         df_rank['Vývoj pořadí'] = ""
+        leader_score = df_rank.iloc[0]['Celkem'] if not df_rank.empty else 0
+        
         for idx, row in df_rank.iterrows():
-            email = row['Email']
-            if email in prev_ranks:
-                diff = prev_ranks[email] - row['Poradi'] 
-                if diff > 0: df_rank.at[idx, 'Vývoj pořadí'] = f"🟢 ▲{diff}"
-                elif diff < 0: df_rank.at[idx, 'Vývoj pořadí'] = f"🔴 ▼{abs(diff)}"
-                else: df_rank.at[idx, 'Vývoj pořadí'] = "➖"
+            if leader_score == 0:
+                df_rank.at[idx, 'Vývoj pořadí'] = "➖"
             else:
-                df_rank.at[idx, 'Vývoj pořadí'] = "🆕"
+                email = row['Email']
+                if email in prev_ranks:
+                    diff = prev_ranks[email] - row['Pořadí'] 
+                    if diff > 0: df_rank.at[idx, 'Vývoj pořadí'] = f"🟢 ▲{diff}"
+                    elif diff < 0: df_rank.at[idx, 'Vývoj pořadí'] = f"🔴 ▼{abs(diff)}"
+                    else: df_rank.at[idx, 'Vývoj pořadí'] = "➖"
+                else:
+                    df_rank.at[idx, 'Vývoj pořadí'] = "🆕"
 
         # ZÁLOŽKY
         tab_names = [
             "🏒 Tipování", "🕵️ Přehled", "🏆 Medaile", "🥇 Žebříček", 
             "🎯 Statistiky", "⚙️ Profil", "📜 Pravidla", 
-            "🏛️ Historické výsledky", "💰 Startovné a výhry"
+            "🏛️ Historické výsledky", "💰 Startovné a výhry", "🗣️ Diskuze"
         ]
         
         # 2. Zjištění role a přidání Admin záložky
@@ -736,11 +755,11 @@ def main():
         # 3. Vytvoření záložek
         all_tabs = st.tabs(tab_names)
 
-        # 4. Rozbalení standardních záložek (prvních 9)
-        t_matches, t_overview, t_long, t_rank, t_stats, t_prof, t_rules, t_history, t_bank = all_tabs[:9]
+        # 4. Rozbalení standardních záložek (prvních 10)
+        t_matches, t_overview, t_long, t_rank, t_stats, t_prof, t_rules, t_history, t_bank, t_chat = all_tabs[:10]
         
         # 5. Admin záložka (pokud existuje, je poslední)
-        t_admin = all_tabs[9] if is_admin else None
+        t_admin = all_tabs[10] if is_admin else None
 
         # 1. TIPOVÁNÍ
         with t_matches:
@@ -823,7 +842,7 @@ def main():
             st.header("Globální přehled tipů")
             
             # Příprava dat
-            rank_map = df_rank.set_index('Email')['Poradi'].to_dict()
+            rank_map = df_rank.set_index('Email')['Pořadí'].to_dict()
             my_email = st.session_state.get('user_email', '')
 
             # 1. SEŘAZENÍ HRÁČŮ (JÁ PRVNÍ, PAK OSTATNÍ)
@@ -1009,40 +1028,78 @@ def main():
                 # FILTR: Gratulujeme jen těm, co zaplatili
                 df_winners = df_rank[df_rank['Zaplaceno'] == 'ANO'].sort_values("Celkem", ascending=False)
                 
-                if len(df_winners) >= 3:
+                if len(df_winners) >= 1:
                     st.success("🎉 **TURNAJ UKONČEN! GRATULACE VÍTĚZŮM!** 🎉")
-                    n1 = df_winners.iloc[0]['Hráč']; n2 = df_winners.iloc[1]['Hráč']; n3 = df_winners.iloc[2]['Hráč']
-                    st.markdown(f"### 🥇 {n1} | 🥈 {n2} | 🥉 {n3}")
-                    st.markdown("Pro předání výhry se ozvěte na **tipovacka.mibo@gmail.com**.")
+                
+                    # Získání jmen pro jednotlivá místa (může jich být víc)
+                    firsts = df_winners[df_winners['Pořadí'] == 1]['Hráč'].tolist()
+                    seconds = df_winners[df_winners['Pořadí'] == 2]['Hráč'].tolist()
+                    thirds = df_winners[df_winners['Pořadí'] == 3]['Hráč'].tolist()
+                
+                    def fmt_names(names): return ", ".join(names) if names else "-"
+
+                    st.markdown(f"### 🥇 {fmt_names(firsts)}")
+                    if seconds: st.markdown(f"### 🥈 {fmt_names(seconds)}")
+                    if thirds: st.markdown(f"### 🥉 {fmt_names(thirds)}")
+                
+                    st.markdown("Pro předání výhry se ozvěte na **tipovacka.mibo@gmail.com**. Pro zobrazení výše výhry se podívejte so záložky Startovné a výhry.")
             
             st.header("Celkové pořadí")
             
             if len(df_rank) > 0:
                 s1 = df_rank.iloc[0]['Celkem']; s2 = df_rank.iloc[1]['Celkem'] if len(df_rank) > 1 else 0; s3 = df_rank.iloc[2]['Celkem'] if len(df_rank) > 2 else 0
                 
-                df_rank['Ztráta na 1.'] = df_rank['Celkem'].apply(lambda x: s1 - x if s1 > x else "")
-                df_rank['Ztráta na 2.'] = df_rank['Celkem'].apply(lambda x: s2 - x if s2 > x else "")
-                df_rank['Ztráta na 3.'] = df_rank['Celkem'].apply(lambda x: s3 - x if s3 > x else "")
+                df_rank['Ztráta na 1. místo'] = df_rank['Celkem'].apply(lambda x: s1 - x if s1 > x else "")
+                df_rank['Ztráta na 2. místo'] = df_rank['Celkem'].apply(lambda x: s2 - x if s2 > x else "")
+                df_rank['Ztráta na 3. místo'] = df_rank['Celkem'].apply(lambda x: s3 - x if s3 > x else "")
 
-                cols_to_fix = ['Body Zápasy', 'Body Bonusy', 'Celkem']
+                cols_to_fix = ['Body Zápasy', 'Bonusy', 'Celkem']
                 for col in cols_to_fix:
                     df_rank[col] = df_rank[col].astype(str) + " b."
-                for col in ['Ztráta na 1.', 'Ztráta na 2.', 'Ztráta na 3.']:
+                for col in ['Ztráta na 1. místo', 'Ztráta na 2. místo', 'Ztráta na 3. místo']:
                     df_rank[col] = df_rank[col].apply(lambda x: f"-{x} b." if x != "" else "")
 
             at = sorted(list(set(df_rank['Tým'].replace('', '-'))))
             vybrany_tym = st.selectbox("Filtr týmu", ["Všechny"] + at)
             if vybrany_tym != "Všechny": df_rank = df_rank[df_rank['Tým'] == vybrany_tym]
             
-            cols = ['Vývoj pořadí', 'Hráč', 'Tým', 'Body Zápasy', 'Body Bonusy', 'Celkem', 'Ztráta na 1.', 'Ztráta na 2.', 'Ztráta na 3.']
+            # PŘIDÁNO 'Poradi' DO SLOUPCŮ
+            cols = ['Pořadí', 'Vývoj pořadí', 'Hráč', 'Tým', 'Body Zápasy', 'Bonusy', 'Celkem', 'Ztráta na 1. místo', 'Ztráta na 2. místo', 'Ztráta na 3. místo']
             
-            def highlight_top3(s):
-                if s.name == 1: return ['background-color: #FFD700; color: black'] * len(s)
-                elif s.name == 2: return ['background-color: #C0C0C0; color: black'] * len(s)
-                elif s.name == 3: return ['background-color: #CD7F32; color: black'] * len(s)
-                else: return [''] * len(s)
+            def highlight_rows(s):
+                # 1. Zjistíme, jestli je to řádek přihlášeného hráče
+                is_me = (s['Hráč'] == st.session_state['user_name'])
+                
+                # 2. Zjistíme reálné umístění (1, 2, 3...)
+                rank = s['Pořadí']
+                
+                # Získáme hodnotu bodů (je to string "0 b.", musíme to ošetřit)
+                points_str = str(s['Celkem']).replace(" b.", "")
+                try:
+                    points = float(points_str)
+                except:
+                    points = 0
+                
+                css = ''
+                
+                # Barvíme medaile POUZE pokud má hráč víc než 0 bodů
+                if points > 0:
+                    if rank == 1: css = 'background-color: #FFD700; color: black;'
+                    elif rank == 2: css = 'background-color: #C0C0C0; color: black;'
+                    elif rank == 3: css = 'background-color: #CD7F32; color: black;'
+                
+                # 3. Zvýraznění pro mě (aplikuje se vždy)
+                if is_me:
+                    # Pokud nemám medaili (nebo se ještě nehraje), dám si světle modré pozadí
+                    if not css: css = 'background-color: #e8f4f8; color: black;'
+                    css += ' font-weight: bold; border: 2px solid #007bff;'
+                
+                return [css] * len(s)
 
-            styled_rank = df_rank[cols].style.apply(highlight_top3, axis=1)
+            # Přejmenování sloupce pro hezčí zobrazení
+            df_display = df_rank[cols].rename(columns={'Pořadí': 'Pořadí'})
+
+            styled_rank = df_rank[cols].style.apply(highlight_rows, axis=1)
             st.dataframe(styled_rank, use_container_width=True, hide_index=True)
             
         # 5. STATISTIKY
@@ -1199,7 +1256,9 @@ def main():
                 # A. ZMĚNA ÚDAJŮ
                 with st.form("prof"):
                     st.subheader("Osobní údaje")
-                    # Jméno je nyní statické (nelze editovat)
+                    # Zobrazení ID a Jména
+                    st.write(f"🆔 Tvoje hráčské ID: **{current_data.get('ID', 'N/A')}**")
+                    st.caption("Toto ID uváděj do poznámky při platbě startovného.")
                     st.write(f"Jméno hráče: **{current_data['Jmeno']}**")
                     
                     st.divider()
@@ -1357,7 +1416,64 @@ def main():
             me_email = st.session_state.get('user_email', '')
             if "mibo" in me_email.lower():
                  st.info("💡 **Zajímavost:** Hráč **MiBo** má na kontě neuvěřitelných 7 medailí z obou sportů (4x🥈, 3x🥉). To už je skoro prokletí! 😅")    
+        # 10. DISKUZE
+        with t_chat:
+            st.header("🗣️ Diskuze")
+            
+            # --- LOGIKA NAČÍTÁNÍ VÍCE ZPRÁV ---
+            # Inicializace počítadla v session state, pokud tam není
+            if 'chat_limit' not in st.session_state:
+                st.session_state['chat_limit'] = 30
+            
+            # Kolik zpráv máme celkem v DB?
+            total_msgs = len(chat_data)
+            # Kolik jich teď chceme zobrazit?
+            current_limit = st.session_state['chat_limit']
+            
+            st.caption(f"Místo pro hecování, analýzy a trash-talk. Zobrazuji posledních **{min(current_limit, total_msgs)}** zpráv.")
+            
+            # A) VSTUPNÍ POLE
+            with st.form("chat_input_form", clear_on_submit=True):
+                col_ch1, col_ch2 = st.columns([5, 1], vertical_alignment="bottom")
+                new_msg = col_ch1.text_input("Napiš zprávu...", key="chat_msg_input", placeholder="Kdo neskáče není Čech...")
+                sent = col_ch2.form_submit_button("Odeslat ✈️")
+                
+                if sent and new_msg:
+                    prague_tz = pytz.timezone('Europe/Prague')
+                    now_str = datetime.now(prague_tz).strftime("%d.%m. %H:%M")
+                    user_nm = st.session_state['user_name']
+                    try:
+                        ws_chat.append_row([now_str, user_nm, new_msg])
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as e: st.error(f"Chyba: {e}")
 
+            st.divider()
+            
+            # B) VÝPIS ZPRÁV
+            chat_container = st.container()
+            with chat_container:
+                if not chat_data:
+                    st.info("Zatím tu je ticho... Buď první!")
+                else:
+                    # Vezmeme posledních X zpráv podle limitu (např. posledních 30, 60...)
+                    msgs_to_show = chat_data[-current_limit:]
+                    
+                    # Otočíme je, aby nejnovější byly nahoře
+                    for msg in reversed(msgs_to_show): 
+                        is_me = (msg['Hrac'] == st.session_state['user_name'])
+                        avatar = "😎" if is_me else "👤"
+                        with st.chat_message(name=msg['Hrac'], avatar=avatar):
+                            st.write(f"**{msg['Hrac']}** <small style='color:grey'>({msg['Datum']})</small>", unsafe_allow_html=True)
+                            st.write(msg['Zprava'])
+            
+            # C) TLAČÍTKO "NAČÍST DALŠÍ"
+            # Zobrazíme ho jen, pokud máme v záloze víc zpráv, než kolik zrovna ukazujeme
+            if total_msgs > current_limit:
+                st.write("---")
+                if st.button(f"Načíst dalších 30 starších zpráv 📜 ({total_msgs - current_limit} zbývá)"):
+                    st.session_state['chat_limit'] += 30
+                    st.rerun()
         # 9. STARTOVNÉ
         with t_bank:
             st.header("Startovné, Bank a Výhry")
@@ -1374,17 +1490,78 @@ def main():
             c1, c2 = st.columns(2)
             with c1:
                 st.subheader("Platební údaje")
-                st.write("**Číslo účtu:** 1596874001/2700"); st.write(f"**Částka:** {ENTRY_FEE} Kč"); st.write("**Poznámka:** Tvoje jméno/přezdívka")
+                my_id = me.get('ID', '?') if me else '?'
+                st.write("**Číslo účtu:** 1596874001/2700"); st.write(f"**Částka:** {ENTRY_FEE} Kč")
+                st.markdown(f"**Poznámka pro příjemce:** `{st.session_state['user_name']} (ID: {my_id})`")
+                st.caption("Prosím uveď ID, ať platbu snadno spárujeme.")
                 if os.path.exists("qr_platba.jpeg"):
                     st.image("qr_platba.jpeg", caption="QR Platba", width=250)
                 else:
                     st.info("QR kód není nahrán.")
             with c2:
-                st.subheader("Aktuální výše výher")
-                st.write(f"🥇 **1. Místo:** {int(bank_total * 0.6)} Kč")
-                st.write(f"🥈 **2. Místo:** {int(bank_total * 0.2)} Kč")
-                st.write(f"🥉 **3. Místo:** {int(bank_total * 0.1)} Kč")
+                st.subheader("Aktuální rozdělení výher")
+                
+                # Definice banků (60% / 20% / 10% - zbývá 10% rezerva/poplatky)
+                pot_1 = int(bank_total * 0.6)
+                pot_2 = int(bank_total * 0.2)
+                pot_3 = int(bank_total * 0.1)
+                
+                # Logika dělení (Split Pot)
+                # Spočítáme, kolik lidí je na 1., 2. a 3. místě
+                c1 = len(df_rank[df_rank['Pořadí'] == 1])
+                c2 = len(df_rank[df_rank['Pořadí'] == 2])
+                c3 = len(df_rank[df_rank['Pořadí'] == 3])
+                
+                # --- VÝPOČET PRO 1. MÍSTO ---
+                prize_1 = 0
+                desc_1 = ""
+                if c1 == 1:
+                    prize_1 = pot_1
+                elif c1 > 1:
+                    # Dělí se o 1. místo a další místa pod tím
+                    pool = pot_1
+                    if c1 >= 2: pool += pot_2 # Pokud jsou 2 a víc, berou i stříbro
+                    if c1 >= 3: pool += pot_3 # Pokud jsou 3 a víc, berou i bronz
+                    prize_1 = int(pool / c1)
+                    desc_1 = f"(Dělená výhra: {c1} hráči)"
 
+                # --- VÝPOČET PRO 2. MÍSTO ---
+                # Existuje jen pokud je na 1. místě sám
+                prize_2 = 0
+                desc_2 = ""
+                if c1 == 1:
+                    if c2 == 1:
+                        prize_2 = pot_2
+                    elif c2 > 1:
+                        # Dělí se o 2. a 3. místo
+                        pool = pot_2
+                        if c2 >= 2: pool += pot_3
+                        prize_2 = int(pool / c2)
+                        desc_2 = f"(Dělená výhra: {c2} hráči)"
+
+                # --- VÝPOČET PRO 3. MÍSTO ---
+                # Existuje jen pokud 1. a 2. místo obsadili max 2 lidé dohromady
+                prize_3 = 0
+                desc_3 = ""
+                slots_taken = c1 + (c2 if c1 == 1 else 0) # Kolik pozic je zabráno před bronzem
+                
+                if slots_taken < 3: 
+                    # Bronz se rozděluje mezi všechny na 3. místě
+                    if c3 > 0:
+                        prize_3 = int(pot_3 / c3)
+
+                # VÝPIS
+                st.write(f"🥇 **1. Místo:** {prize_1} Kč {desc_1}")
+                if prize_2 > 0:
+                    st.write(f"🥈 **2. Místo:** {prize_2} Kč {desc_2}")
+                else:
+                    st.caption("🥈 2. Místo: - (bráno vítězi)")
+                    
+                if prize_3 > 0:
+                    st.write(f"🥉 **3. Místo:** {prize_3} Kč {desc_3}")
+                else:
+                    st.caption("🥉 3. Místo: - (bráno vyššími pozicemi)")
+        
         # --- ADMIN & MODERATOR PANEL ---
         if is_admin and t_admin:
             with t_admin:
@@ -1443,7 +1620,7 @@ def main():
 
                     with col_ad2:
                         with st.expander("Správa plateb"):
-                            users_list = [f"{u['Jmeno']} ({u['Email']})" for u in users]
+                            users_list = [f"[ID: {u.get('ID','?')}] {u['Jmeno']} ({u['Email']})" for u in users]
                             sel_user_pay = st.selectbox("Vyber uživatele", users_list)
                             sel_email = sel_user_pay.split(" (")[-1].replace(")", "")
                             u_idx = next((i for i, u in enumerate(users) if str(u['Email']) == sel_email), 0)
@@ -1460,5 +1637,4 @@ def main():
     st.markdown('<div class="footer-warning">⚠️ <b>Tip:</b> Pro pohyb v aplikaci používej záložky. Tlačítko Zpět nebo Refresh (F5) tě může odhlásit.</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
-
     main()
