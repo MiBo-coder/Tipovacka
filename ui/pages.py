@@ -1,0 +1,1212 @@
+"""
+UI Stránky - všechny záložky aplikace  
+KOMPLETNÍ verze - adaptováno z tipovačka_12.py
+"""
+
+import streamlit as st
+import pandas as pd
+import gspread
+import time
+import os
+from datetime import datetime, timedelta
+import pytz
+
+# Vlastní moduly
+from data.database import load_all_data, get_worksheets_resources, save_tips_batch
+from business.scoring import spocitej_body_zapas, get_all_teams, is_past_deadline, spocitej_dlouhodobe_body
+from ui.components import get_team_label, get_flag
+from utils.config import (
+    TIMEZONE, ENTRY_FEE, BANK_ACCOUNT, HISTORY_HOCKEY, HISTORY_FOOTBALL,
+    OFFICIAL_RESULTS, DEADLINE
+)
+
+
+def get_user_points_at_date(users, tipy, zapasy, date_limit):
+    """Pomocná funkce pro výpočet bodů k určitému datu"""
+    match_points = {}
+    for u in users:
+        match_points[str(u['Email'])] = 0
+    
+    finished_before = [z for z in zapasy if str(z.get('Skore_Domaci', '')) != "" and z.get('Datum_Obj') and z['Datum_Obj'] < date_limit]
+    
+    for z in finished_before:
+        zid = z['ID']
+        for t in tipy:
+            if t['Zapas_ID'] == zid:
+                email = str(t['Email'])
+                p, _, _, _ = spocitej_body_zapas(
+                    t['Tip_Domaci'], t['Tip_Hoste'],
+                    z['Skore_Domaci'], z['Skore_Hoste'],
+                    z['Domaci'], z['Hoste'], z.get('Faze', ''),
+                    t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
+                )
+                match_points[email] += p
+    
+    return match_points
+
+
+def render_main_application():
+    """Hlavní aplikace pro přihlášeného uživatele"""
+    
+    # === NAČTENÍ DAT ===
+    zapasy, tipy, users, config, chat_data = load_all_data()
+    ws_zapasy, ws_tipy, ws_users, ws_nastaveni, ws_chat = get_worksheets_resources()
+    
+    # Horní lišta
+    curr_id = next((u.get('ID', '?') for u in users if str(u['Email']) == st.session_state['user_email']), '?')
+    c1, _, c3 = st.columns([3, 4, 1])
+    c1.write(f"👤 **{st.session_state['user_name']}** (ID: {curr_id})")
+    c1.caption(f"Tým: {st.session_state.get('user_team') or '-'}")
+    if c3.button("Odhlásit"):
+        st.session_state['logged_in'] = False
+        st.rerun()
+    st.divider()
+    
+    me_stats = next((u for u in users if str(u['Email']) == st.session_state['user_email']), {})
+    has_medals = (
+        str(me_stats.get('Tip_Vitez','')).strip() and 
+        str(me_stats.get('Tip_Med1','')).strip() and 
+        str(me_stats.get('Tip_Med2','')).strip() and 
+        str(me_stats.get('Tip_Med3','')).strip()
+    )
+    
+    if not has_medals and not is_past_deadline(DEADLINE):
+        st.warning("⚠️ **POZOR:** Nemáš natipované medaile a vítěze! Bez toho přicházíš o možnost získat bonusové body. Jdi do záložky **Medaile** a ulož tipy.")
+
+    prague_tz = pytz.timezone('Europe/Prague')
+    now_prague = datetime.now(prague_tz)
+    match_dt_aware = None
+    upcoming_match = None
+
+    for z in zapasy:
+        if str(z['Skore_Domaci']) == "":
+            match_dt = z.get('Datum_Obj') # Toto už je nyní díky nové parse_date "aware" (má zónu)
+            if match_dt:
+                # Pro jistotu, kdyby náhodou zónu neměl (stará cache), ošetříme to:
+                if match_dt.tzinfo is None:
+                    match_dt = prague_tz.localize(match_dt)
+
+                if match_dt > now_prague:
+                    upcoming_match = z
+                    match_dt_aware = match_dt
+                    break
+
+    if upcoming_match and match_dt_aware:
+        delta = match_dt_aware - now_prague
+        hours, remainder = divmod(delta.seconds, 3600); minutes, _ = divmod(remainder, 60)
+
+        tips_d, tips_h = 0, 0
+        for t in tipy:
+            if t['Zapas_ID'] == upcoming_match['ID']:
+                if t['Tip_Domaci'] > t['Tip_Hoste']: tips_d += 1
+                elif t['Tip_Hoste'] > t['Tip_Domaci']: tips_h += 1
+        total_tips = tips_d + tips_h
+        perc_d = int(tips_d/total_tips*100) if total_tips else 0
+        perc_h = int(tips_h/total_tips*100) if total_tips else 0
+
+        f_d = get_flag(upcoming_match['Domaci']); f_h = get_flag(upcoming_match['Hoste'])
+
+        st.markdown(f"""
+        <div class="next-match-box">
+            <b>⏱️ Nejbližší zápas:</b> {f_d} {upcoming_match['Domaci']} vs {f_h} {upcoming_match['Hoste']} (za {delta.days}d {hours}h {minutes}m)<br>
+            <small>Jak tipují hráči: {perc_d}% domácí / {perc_h}% hosté</small>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # VÝPOČTY BODŮ
+    match_points = {}; exact_matches = {}; matches_scored = {}; stats_basic = {}; stats_playoff = {}
+    # Nové bonusové kontejnery
+    bonus_odvaha = {str(u['Email']): 0 for u in users}
+    bonus_tiper_dne = {str(u['Email']): 0 for u in users}
+
+    zapas_map = {z['ID']: z for z in zapasy}
+    finished_matches = [z for z in zapasy if str(z['Skore_Domaci']) != ""]
+    is_tournament_over = (len(finished_matches) == len(zapasy) and len(zapasy) > 0)
+
+    for u in users: 
+        email = str(u['Email'])
+        match_points[email] = 0; exact_matches[email] = 0; matches_scored[email] = 0; stats_basic[email] = 0; stats_playoff[email] = 0
+
+    tips_map = {}
+    tips_by_match = {} # Pro výpočet procent (Odvaha)
+
+    for t in tipy:
+        tips_map[(str(t['Email']), t['Zapas_ID'])] = t
+        tips_by_match.setdefault(t['Zapas_ID'], []).append(t)
+
+    # 1. ZÁKLADNÍ PRŮCHOD (Body za zápasy + Prodloužení)
+    for t in tipy:
+        zid = t['Zapas_ID']; email = str(t['Email'])
+        if zid in zapas_map and str(zapas_map[zid]['Skore_Domaci']) != "":
+            z = zapas_map[zid]
+            faze = str(z.get('Faze', '')).lower()
+            # Voláme novou verzi funkce s prodloužením
+            p, ie, sa, _ = spocitej_body_zapas(
+                t['Tip_Domaci'], t['Tip_Hoste'], z['Skore_Domaci'], z['Skore_Hoste'], 
+                z['Domaci'], z['Hoste'], faze,
+                t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
+            )
+            match_points[email] += p
+            if ie: exact_matches[email] += 1
+            if sa: matches_scored[email] += 1
+            if "playoff" in faze or "finále" in faze or "o 3. místo" in faze: stats_playoff[email] += p
+            else: stats_basic[email] += p
+
+    # 2. VÝPOČET: BONUS ZA ODVAHU (Underdog)
+    for z in finished_matches:
+        zid = z['ID']
+        match_tips = tips_by_match.get(zid, [])
+        if not match_tips: continue
+
+        # Kolik % věří komu
+        cnt_d = sum(1 for mt in match_tips if mt['Tip_Domaci'] > mt['Tip_Hoste'])
+        cnt_h = sum(1 for mt in match_tips if mt['Tip_Hoste'] > mt['Tip_Domaci'])
+        total = len(match_tips)
+        if total == 0: continue
+
+        perc_d = cnt_d / total; perc_h = cnt_h / total
+
+        # Kdo vyhrál?
+        rd, rh = int(z['Skore_Domaci']), int(z['Skore_Hoste'])
+        winner = 'd' if rd > rh else ('h' if rh > rd else 'draw')
+
+        # Podmínka < 20%
+        is_underdog_win = (winner == 'd' and perc_d < 0.20) or (winner == 'h' and perc_h < 0.20)
+
+        if is_underdog_win:
+            for mt in match_tips:
+                u_win = 'd' if mt['Tip_Domaci'] > mt['Tip_Hoste'] else ('h' if mt['Tip_Hoste'] > mt['Tip_Domaci'] else 'draw')
+                if u_win == winner:
+                    bonus_odvaha[str(mt['Email'])] += 1
+
+    # 3. VÝPOČET: TIPER DNE (Zpětně podle dnů)
+    tiper_dne_log = [] # Data pro tabulku ve statistikách
+    dates = sorted(list(set([z['Datum_Obj'].date() for z in finished_matches if z.get('Datum_Obj')])))
+
+    for d_date in dates:
+        matches_that_day = [z for z in finished_matches if z.get('Datum_Obj') and z['Datum_Obj'].date() == d_date]
+        if not matches_that_day: continue
+
+        daily_pts = {str(u['Email']): 0 for u in users}
+        for z in matches_that_day:
+            for u in users:
+                email = str(u['Email'])
+                t = tips_map.get((email, z['ID']))
+                if t:
+                    p, _, _, _ = spocitej_body_zapas(
+                        t['Tip_Domaci'], t['Tip_Hoste'], z['Skore_Domaci'], z['Skore_Hoste'], 
+                        z['Domaci'], z['Hoste'], z.get('Faze',''),
+                        t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
+                    )
+                    daily_pts[email] += p
+
+        # Kdo byl nejlepší ten den?
+        if daily_pts:
+            max_val = max(daily_pts.values())
+            if max_val > 0: # Musí mít aspoň bod
+                winners = [e for e, s in daily_pts.items() if s == max_val]
+                bonus_val = 0.5 * len(matches_that_day)
+
+                # Zápis bonusů
+                for w in winners:
+                    bonus_tiper_dne[w] += bonus_val
+                    # Logování pro statistiku (jen pokud je to včera - pro "aktuálnost", nebo vše? Zadání říká "ukazovat kdo získal za předchozí den")
+                    # Uložíme si seznam všech vítězů dnů pro historii, filtrovat budeme při zobrazení
+                    w_name = next((u['Jmeno'] for u in users if str(u['Email']) == w), w)
+                    tiper_dne_log.append({"Datum": d_date, "Jméno": w_name, "Body ten den": max_val, "Bonus": bonus_val})
+
+    # Kompletace celkových bodů
+    # Bonus ostrostřelci (Původní logika)
+    max_exact = 0; bonus_ostrostrelci = {}
+    if exact_matches: max_exact = max(exact_matches.values())
+    for email, count in exact_matches.items():
+        bonus_ostrostrelci[email] = 6 if (is_tournament_over and count == max_exact and max_exact > 0) else 0
+
+    long_term_points = {}
+    for u in users:
+        email = str(u['Email'])
+        lt_pts = spocitej_dlouhodobe_body(u, OFFICIAL_RESULTS)
+        # SEČTENÍ VŠECH NOVÝCH BONUSŮ ZDE:
+        total_bonus = lt_pts + bonus_ostrostrelci.get(email, 0) + bonus_odvaha.get(email, 0) + bonus_tiper_dne.get(email, 0)
+        long_term_points[email] = total_bonus
+
+    total_points = {e: match_points.get(e, 0) + long_term_points.get(e, 0) for e in match_points}
+
+    # PŘÍPRAVA DAT PRO ŽEBŘÍČEK
+    rd = []
+    for u in users:
+        e = str(u['Email'])
+        rd.append({
+            "Email": e, 
+            "Hráč": u['Jmeno'], 
+            "Tým": u.get('Tym', '-'), 
+            "Zaplaceno": str(u.get('Zaplaceno', 'NE')).upper(), 
+            "Body Zápasy": match_points.get(e,0), 
+            "Bonusy": long_term_points.get(e,0), 
+            "Celkem": total_points.get(e,0)
+        })
+    df_rank = pd.DataFrame(rd).sort_values("Celkem", ascending=False).reset_index(drop=True)
+    df_rank['Pořadí'] = df_rank['Celkem'].rank(method='min', ascending=False).astype(int)
+
+    # Trendy
+    prague_tz = pytz.timezone('Europe/Prague')  # 1. Musíme znát zónu
+    yesterday_limit = datetime.now(prague_tz) - timedelta(days=1) # 2. Teď je 'yesterday_limit' aware (má zónu)
+    pts_yesterday = get_user_points_at_date(users, tipy, zapasy, date_limit=yesterday_limit)
+    rd_prev = []
+    for u in users:
+        e = str(u['Email'])
+        b_prev = pts_yesterday.get(e, 0)
+        rd_prev.append({"Email": e, "Total": b_prev})
+    df_prev = pd.DataFrame(rd_prev).sort_values("Total", ascending=False).reset_index(drop=True)
+    df_prev.index += 1
+    df_prev['Pořadí'] = df_prev.index
+    prev_ranks = df_prev.set_index('Email')['Pořadí'].to_dict()
+
+    df_rank['Vývoj pořadí'] = ""
+    leader_score = df_rank.iloc[0]['Celkem'] if not df_rank.empty else 0
+
+    for idx, row in df_rank.iterrows():
+        if leader_score == 0:
+            df_rank.at[idx, 'Vývoj pořadí'] = "➖"
+        else:
+            email = row['Email']
+            if email in prev_ranks:
+                diff = prev_ranks[email] - row['Pořadí'] 
+                if diff > 0: df_rank.at[idx, 'Vývoj pořadí'] = f"🟢 ▲{diff}"
+                elif diff < 0: df_rank.at[idx, 'Vývoj pořadí'] = f"🔴 ▼{abs(diff)}"
+                else: df_rank.at[idx, 'Vývoj pořadí'] = "➖"
+            else:
+                df_rank.at[idx, 'Vývoj pořadí'] = "🆕"
+
+    # --- POČÍTADLO ZPRÁV (CELKOVÉ) ---
+    count_msg = len(chat_data)
+    label_chat = f"🗣️ Diskuze ({count_msg})"
+
+    # ZÁLOŽKY
+    tab_names = [
+        "🏒 Tipování", "🕵️ Přehled", "🏆 Medaile", "🥇 Žebříček", 
+        "🎯 Statistiky", "⚙️ Profil", "📜 Pravidla",
+        "🏛️ Historické výsledky", "💰 Startovné a výhry", label_chat
+    ]
+
+    # 2. Zjištění role a přidání Admin záložky
+    user_role = st.session_state.get('user_role')
+    is_admin = user_role in ['admin', 'moderator']
+
+    if is_admin:
+        tab_names.append("🛠️ Admin")
+
+    # 3. Vytvoření záložek
+    all_tabs = st.tabs(tab_names)
+
+    # 4. Rozbalení standardních záložek (prvních 10)
+    t_matches, t_overview, t_long, t_rank, t_stats, t_prof, t_rules, t_history, t_bank, t_chat = all_tabs[:10]
+
+    # 5. Admin záložka (pokud existuje, je poslední)
+    t_admin = all_tabs[10] if is_admin else None
+
+    # 1. TIPOVÁNÍ
+    with t_matches:
+        st.header("Tvoje tipy na jednotlivé zápasy")
+        
+        with st.expander("💡 Info k tipování (Remízy, prodloužení...) - Klikni pro nápovědu"):
+            st.markdown("""
+            * Tipy můžeš ukládat průběžně a kdykoliv se k nim vrátit (až do začátku zápasu).
+            * **Remízy se neukládají!** Hokej se hraje do rozhodnutí, vždy musíš vybrat vítěze (např. 3:2).
+            * Pokud věříš v remízu po 60 minutách, nastav rozdíl skóre o 1 gól a zaškrtni "Bude se prodlužovat?".
+            * Stav **0:0** se bere jako "nenatipováno" a při ukládání se ignoruje (nehlásí chybu).
+            """)
+
+        moje_tipy_dict = {str(t['Zapas_ID']): t for t in tipy if str(t['Email']) == st.session_state['user_email']}
+        
+        with st.form("tips_form"):
+            tips_to_save = {} 
+            # Pomocná mapa pro názvy zápasů
+            match_names_map = {}
+
+            for z in zapasy:
+                zid = z['ID']
+                match_names_map[str(zid)] = f"{z['Domaci']} vs {z['Hoste']}"
+
+                d_obj = z.get('Datum_Obj')
+                d_str = d_obj.strftime("%d.%m. %H:%M") if d_obj else z['Datum']
+                label = f"{get_team_label(z['Domaci'])} - {get_team_label(z['Hoste'])}"
+                st.markdown(f"**{label}** <small>({d_str})</small>", unsafe_allow_html=True)
+
+                mt = moje_tipy_dict.get(str(zid), {})
+
+                # LOGIKA ZAMČENÍ
+                prague_tz = pytz.timezone('Europe/Prague')
+                now_prague = datetime.now(prague_tz)
+                match_dt = z.get('Datum_Obj')
+                if match_dt and match_dt.tzinfo is None:
+                    match_dt = prague_tz.localize(match_dt)
+
+                is_locked = (match_dt and now_prague > match_dt)
+                is_played = (str(z['Skore_Domaci']) != "")
+
+                if is_played or is_locked:
+                    # Výsledek (již nelze tipovat)
+                    p, ie, _, ot_p = spocitej_body_zapas(
+                        mt.get('Tip_Domaci'), mt.get('Tip_Hoste'), 
+                        z['Skore_Domaci'], z['Skore_Hoste'], 
+                        z['Domaci'], z['Hoste'], z.get('Faze',''),
+                        mt.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
+                    )
+                    ot_txt = f" (OT: {ot_p}b)" if ot_p != 0 else ""
+                    st.info(f"Výsledek: {z['Skore_Domaci']}:{z['Skore_Hoste']} | Tvůj tip: {mt.get('Tip_Domaci','-')}:{mt.get('Tip_Hoste','-')} | **{p}b** {ot_txt}")
+                else:
+                    # Formulář
+                    c1, c2, c3 = st.columns([1,1,3])
+                    old_d = mt.get('Tip_Domaci', 0)
+                    old_h = mt.get('Tip_Hoste', 0)
+                    old_ot = mt.get('Tip_Prodlouzeni', '') 
+
+                    v_d = c1.number_input("D", value=int(old_d) if old_d != "" else 0, key=f"d_{zid}", label_visibility="collapsed", min_value=0)
+                    v_h = c2.number_input("H", value=int(old_h) if old_h != "" else 0, key=f"h_{zid}", label_visibility="collapsed", min_value=0)
+                    is_checked = (str(old_ot).upper() == "ANO")
+                    v_ot = c3.checkbox("Bude se prodlužovat?", value=is_checked, key=f"ot_{zid}", help="Zaškrtni, pokud věříš, že zápas půjde do prodloužení.")
+
+                    # HTML varování u OT
+                    if v_ot and abs(v_d - v_h) != 1:
+                        c3.markdown("""<div style='color: #d9534f; font-weight: bold; text-shadow: 1px 1px 0 #fff;'>⚠️ Rozdíl není 1 gól.</div>""", unsafe_allow_html=True)
+                    elif v_ot:
+                        c3.markdown("""<div style='color: #28a745; font-weight: bold; text-shadow: 1px 1px 0 #fff;'>✅ Tip na OT aktivní.</div>""", unsafe_allow_html=True)
+
+                    tips_to_save[zid] = (v_d, v_h, "ANO" if v_ot else "")
+                st.write("---")
+
+            # --- MÍSTO PRO CHYBOVÉ HLÁŠKY (PŘÍMO NAD TLAČÍTKEM) ---
+            zpravy_placeholder = st.empty()
+            # ------------------------------------------------------
+
+            if st.form_submit_button("💾 Uložit tipy"):
+                draw_errors = []
+                # Kontrola remíz
+                for zid, (d, h, ot) in tips_to_save.items():
+                    # --- OPRAVA: Ignorujeme stav 0:0 (nenatipováno) ---
+                    if d == 0 and h == 0:
+                        continue
+                    
+                    # Pokud není 0:0, ale skóre je stejné -> CHYBA
+                    if d == h:
+                        match_name = match_names_map.get(str(zid), f"Zápas {zid}")
+                        draw_errors.append(match_name)
+                
+                if draw_errors:
+                    error_msg = "❌ **CHYBA: Nelze uložit remízu!**\n\n**Oprav tyto zápasy:**\n"
+                    for err in draw_errors:
+                        error_msg += f"* {err}\n"
+                    error_msg += "\n*Uprav skóre a klikni znovu na Uložit.*"
+                    
+                    # Vypíše se DOLE nad tlačítkem
+                    zpravy_placeholder.error(error_msg)
+                else:
+                    with st.spinner("Ukládám..."): 
+                        save_tips_batch(ws_tipy, st.session_state['user_email'], tips_to_save, tipy)
+                        zpravy_placeholder.success("✅ Tipy úspěšně uloženy!")
+                        time.sleep(1)
+                        st.rerun()
+
+    # 2. PŘEHLED
+    with t_overview:
+        st.header("Globální přehled tipů")
+
+        # Příprava dat
+        rank_map = df_rank.set_index('Email')['Pořadí'].to_dict()
+        my_email = st.session_state.get('user_email', '')
+
+        # 1. SEŘAZENÍ HRÁČŮ (JÁ PRVNÍ, PAK OSTATNÍ)
+        # Vytvoříme seznam uživatelů, kde vy jste na indexu 0
+        sorted_users = sorted(users, key=lambda u: 0 if str(u['Email']) == my_email else 1)
+
+        # A) TABULKA ZÁPASŮ
+        if not finished_matches: 
+            st.info("Zatím žádné odehrané zápasy.")
+        else:
+            data = []
+            tips_map = {(str(t['Email']), t['Zapas_ID']): t for t in tipy}
+
+            # --- I. PŘÍPRAVA DAT (ŘÁDKY) ---
+            for z in finished_matches:
+                faze = z.get('Faze', '')
+                # Základní data řádku (klíče musí odpovídat sloupcům níže)
+                row = {
+                    "Zápas": f"{z['Domaci']} - {z['Hoste']}", 
+                    "Fáze": faze, 
+                    "Výsledek": f"{z['Skore_Domaci']}:{z['Skore_Hoste']}"
+                }
+                if str(z.get('Prodlouzeni','')) == 'ANO': 
+                    row["Výsledek"] += " (OT)"
+
+                # Přidání bodů jednotlivých hráčů
+                for u in sorted_users:
+                    email = str(u['Email'])
+                    t = tips_map.get((email, z['ID']))
+
+                    if t:
+                        p, ie, _, _ = spocitej_body_zapas(
+                            t['Tip_Domaci'], t['Tip_Hoste'], 
+                            z['Skore_Domaci'], z['Skore_Hoste'], 
+                            z['Domaci'], z['Hoste'], z.get('Faze',''),
+                            t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
+                        )
+                        # Formát buňky: "2:1 (OT) (3b)"
+                        txt = f"{t['Tip_Domaci']}:{t['Tip_Hoste']}"
+                        if str(t.get('Tip_Prodlouzeni','')) == 'ANO': txt += " (OT)"
+                        txt += f" ({p} b.)"
+                        if ie: txt = f"⭐ {txt}"
+                    else: 
+                        txt = "-"
+
+                    # Klíčem v datech je email (unikátní), později ho přemapujeme na MultiIndex
+                    row[email] = txt
+                data.append(row)
+
+            # --- II. VYTVOŘENÍ DATAFRAME A MULTIINDEX HLAVIČKY ---
+            # Definujeme pořadí sloupců v DF: Info sloupce + Seřazení uživatelé
+            cols_order = ['Zápas', 'Fáze', 'Výsledek'] + [str(u['Email']) for u in sorted_users]
+            df_ov = pd.DataFrame(data, columns=cols_order)
+
+            # Vytvoření dvouřádkové hlavičky (MultiIndex)
+            # 1. úroveň = Jméno (nebo název sloupce)
+            # 2. úroveň = Statistiky (nebo prázdné)
+            header_tuples = []
+
+            # Pro info sloupce necháme druhý řádek prázdný
+            top_header = "📝 INFO O ZÁPASE"
+            header_tuples.append((top_header, 'Soupeři'))
+            header_tuples.append((top_header, 'Fáze'))
+            header_tuples.append((top_header, 'Výsledek'))
+
+            # Pro uživatele vytvoříme patrovou hlavičku
+            for u in sorted_users:
+                email = str(u['Email'])
+                u_rank = rank_map.get(email, '-')
+                u_points = total_points.get(email, 0)
+
+                # Horní řádek: Jméno
+                top_label = u['Jmeno']
+                # Spodní řádek: Pořadí a body
+                bottom_label = f"{u_rank}. místo ({u_points} b.)"
+
+                header_tuples.append((top_label, bottom_label))
+
+            # Aplikace MultiIndexu na sloupce
+            df_ov.columns = pd.MultiIndex.from_tuples(header_tuples)
+
+            # Vykreslení
+            st.dataframe(
+                df_ov.style.set_properties(**{'text-align': 'center'}), 
+                use_container_width=True, 
+                hide_index=True
+            )
+
+        # B) TABULKA DLOUHODOBÝCH SÁZEK
+        if OFFICIAL_RESULTS.get('winner'):
+            st.divider()
+            st.subheader("🏆 Vyhodnocení dlouhodobých sázek")
+            st.caption("Detailní rozpis bodů za tipy na vítěze a medailisty.")
+
+            long_term_data = []
+            real_winner = str(OFFICIAL_RESULTS['winner'])
+            real_medals = [str(m) for m in OFFICIAL_RESULTS['medals'] if m]
+
+            # Zde řadíme podle bodů (vítěz nahoře), ale můžeme použít sorted_users, pokud chcete sebe nahoře i tady.
+            # Necháme standardní řazení podle úspěchu v LT.
+
+            for u in users:
+                t_w = str(u.get('Tip_Vitez', '-'))
+                t_m1 = str(u.get('Tip_Med1', '-'))
+                t_m2 = str(u.get('Tip_Med2', '-'))
+                t_m3 = str(u.get('Tip_Med3', '-'))
+
+                pts_w = 15 if t_w == real_winner and real_winner else 0
+
+                def get_medal_display(tip_val):
+                    if tip_val in real_medals: return f"{tip_val} (4 b.)"
+                    return f"{tip_val} (0 b.)"
+
+                # Statistiky
+                u_rank = rank_map.get(str(u['Email']), '-')
+                u_points = total_points.get(str(u['Email']), 0)
+
+                # Tady jsme v buňce (data), takže \n funguje, pokud zapneme 'white-space: pre-wrap'
+                player_label = f"{u['Jmeno']}\n{u_rank}. místo ({u_points} b.)"
+
+                lt_row = {
+                    "Hráč": player_label,
+                    "Tip Vítěz": f"{t_w} ({pts_w} b.)" if t_w != '-' else "-",
+                    "Medaile 1": get_medal_display(t_m1),
+                    "Medaile 2": get_medal_display(t_m2),
+                    "Medaile 3": get_medal_display(t_m3),
+                    "Celkem LT": spocitej_dlouhodobe_body(u, OFFICIAL_RESULTS)
+                }
+                long_term_data.append(lt_row)
+
+            if long_term_data:
+                df_lt = pd.DataFrame(long_term_data)
+                df_lt = df_lt.sort_values("Celkem LT", ascending=False)
+
+                # Zde musíme povolit zalamování řádků (pre-wrap) pro sloupec "Hráč"
+                st.dataframe(
+                    df_lt.style.set_properties(**{'text-align': 'center', 'white-space': 'pre-wrap'}), 
+                    use_container_width=True, 
+                    hide_index=True
+                )
+
+    # 3. DLOUHODOBÉ
+    with t_long:
+        st.header("Tvoje tipy na vítěze a medailisty")
+        me_idx = next((i for i, u in enumerate(users) if str(u['Email']) == st.session_state['user_email']), None)
+        mr = users[me_idx] if me_idx is not None else {}
+        has_complete_tips = (str(mr.get('Tip_Vitez','')).strip() and str(mr.get('Tip_Med1','')).strip() and str(mr.get('Tip_Med2','')).strip() and str(mr.get('Tip_Med3','')).strip())
+        if has_complete_tips: st.success("✅ **Máte natipováno.**")
+        else: st.warning("⚠️ **Pozor:** Chybí vám natipovat vítěze a medailisty!")
+        st.info("Uzávěrka před začátkem turnaje!")
+        lck = is_past_deadline(DEADLINE)
+        if lck: st.warning(f"Sázky uzavřeny ({DEADLINE})")
+        ht = get_all_teams(zapasy)
+        with st.form("lb"):
+            sw = st.selectbox("Celkový Vítěz", ht, index=ht.index(mr.get('Tip_Vitez')) if mr.get('Tip_Vitez') in ht else 0, disabled=lck)
+            c1,c2,c3 = st.columns(3)
+            m1 = c1.selectbox("Medaile 1", ht, index=ht.index(mr.get('Tip_Med1')) if mr.get('Tip_Med1') in ht else 0, key="m1", disabled=lck)
+            m2 = c2.selectbox("Medaile 2", ht, index=ht.index(mr.get('Tip_Med2')) if mr.get('Tip_Med2') in ht else 1, key="m2", disabled=lck)
+            m3 = c3.selectbox("Medaile 3", ht, index=ht.index(mr.get('Tip_Med3')) if mr.get('Tip_Med3') in ht else 2, key="m3", disabled=lck)
+            submit_medals = st.form_submit_button("💾 Uložit medaile", disabled=lck)
+
+            # Ukládáme jen když se klikne A NENÍ zamčeno (pojistka)
+            if submit_medals and not lck:
+                with st.spinner("Ukládám medaile..."):
+                    row_idx = me_idx + 2
+                    updates = [
+                        gspread.Cell(row_idx, 7, sw),
+                        gspread.Cell(row_idx, 8, m1),
+                        gspread.Cell(row_idx, 9, m2),
+                        gspread.Cell(row_idx, 10, m3)
+                    ]
+                    try:
+                        ws_users.update_cells(updates)
+                        st.cache_data.clear()
+                        st.success("✅ Tipy na medaile byly úspěšně uloženy!")
+                        time.sleep(1) 
+                        st.rerun()
+                    except Exception as e: st.error(f"Chyba při ukládání: {e}")
+
+    # 4. ŽEBŘÍČEK
+    with t_rank:
+        if OFFICIAL_RESULTS.get('winner'):
+            # FILTR: Gratulujeme jen těm, co zaplatili
+            df_winners = df_rank[df_rank['Zaplaceno'] == 'ANO'].sort_values("Celkem", ascending=False)
+
+            if len(df_winners) >= 1:
+                st.success("🎉 **TURNAJ UKONČEN! GRATULACE VÍTĚZŮM!** 🎉")
+
+                # Získání jmen pro jednotlivá místa (může jich být víc)
+                firsts = df_winners[df_winners['Pořadí'] == 1]['Hráč'].tolist()
+                seconds = df_winners[df_winners['Pořadí'] == 2]['Hráč'].tolist()
+                thirds = df_winners[df_winners['Pořadí'] == 3]['Hráč'].tolist()
+
+                def fmt_names(names): return ", ".join(names) if names else "-"
+
+                st.markdown(f"### 🥇 {fmt_names(firsts)}")
+                if seconds: st.markdown(f"### 🥈 {fmt_names(seconds)}")
+                if thirds: st.markdown(f"### 🥉 {fmt_names(thirds)}")
+
+                st.markdown("Pro předání výhry se ozvěte na **tipovacka.mibo@gmail.com**. Pro zobrazení výše výhry se podívejte so záložky Startovné a výhry.")
+
+        st.header("Celkové pořadí")
+
+        if len(df_rank) > 0:
+            s1 = df_rank.iloc[0]['Celkem']; s2 = df_rank.iloc[1]['Celkem'] if len(df_rank) > 1 else 0; s3 = df_rank.iloc[2]['Celkem'] if len(df_rank) > 2 else 0
+
+            df_rank['Ztráta na 1. místo'] = df_rank['Celkem'].apply(lambda x: s1 - x if s1 > x else "")
+            df_rank['Ztráta na 2. místo'] = df_rank['Celkem'].apply(lambda x: s2 - x if s2 > x else "")
+            df_rank['Ztráta na 3. místo'] = df_rank['Celkem'].apply(lambda x: s3 - x if s3 > x else "")
+
+            cols_to_fix = ['Body Zápasy', 'Bonusy', 'Celkem']
+            for col in cols_to_fix:
+                df_rank[col] = df_rank[col].astype(str) + " b."
+            for col in ['Ztráta na 1. místo', 'Ztráta na 2. místo', 'Ztráta na 3. místo']:
+                df_rank[col] = df_rank[col].apply(lambda x: f"-{x} b." if x != "" else "")
+
+        at = sorted(list(set(df_rank['Tým'].replace('', '-'))))
+        vybrany_tym = st.selectbox("Filtr týmu", ["Všechny"] + at)
+        if vybrany_tym != "Všechny": df_rank = df_rank[df_rank['Tým'] == vybrany_tym]
+
+        # PŘIDÁNO 'Poradi' DO SLOUPCŮ
+        cols = ['Pořadí', 'Vývoj pořadí', 'Hráč', 'Tým', 'Body Zápasy', 'Bonusy', 'Celkem', 'Ztráta na 1. místo', 'Ztráta na 2. místo', 'Ztráta na 3. místo']
+
+        def highlight_rows(s):
+            # 1. Zjistíme, jestli je to řádek přihlášeného hráče
+            is_me = (s['Hráč'] == st.session_state['user_name'])
+
+            # 2. Zjistíme reálné umístění (1, 2, 3...)
+            rank = s['Pořadí']
+
+            # Získáme hodnotu bodů (je to string "0 b.", musíme to ošetřit)
+            points_str = str(s['Celkem']).replace(" b.", "")
+            try:
+                points = float(points_str)
+            except:
+                points = 0
+
+            css = ''
+
+            # Barvíme medaile POUZE pokud má hráč víc než 0 bodů
+            if points > 0:
+                if rank == 1: css = 'background-color: #FFD700; color: black;'
+                elif rank == 2: css = 'background-color: #C0C0C0; color: black;'
+                elif rank == 3: css = 'background-color: #CD7F32; color: black;'
+
+            # 3. Zvýraznění pro mě (aplikuje se vždy)
+            if is_me:
+                # Pokud nemám medaili (nebo se ještě nehraje), dám si světle modré pozadí
+                if not css: css = 'background-color: #e8f4f8; color: black;'
+                css += ' font-weight: bold; border: 2px solid #007bff;'
+
+            return [css] * len(s)
+
+        # Přejmenování sloupce pro hezčí zobrazení
+        df_display = df_rank[cols].rename(columns={'Pořadí': 'Pořadí'})
+
+        styled_rank = df_rank[cols].style.apply(highlight_rows, axis=1)
+        st.dataframe(styled_rank, use_container_width=True, hide_index=True)
+
+    # 5. STATISTIKY
+    with t_stats:
+        st.header("Statistika nuda je, má však cenné údaje")
+
+        # --- NOVÉ STATISTIKY (Tiper Dne & Odvaha) ---
+        col_spec1, col_spec2 = st.columns(2)
+
+        with col_spec1:
+            st.markdown("#### 📅 Tiper Dne")
+            st.caption("Kdo získal bonus za **včerejší** den? (Nejvíce bodů za den)")
+
+            # Zjištění včerejška pro zobrazení "aktuálního" vítěze
+            yesterday = datetime.now().date() - timedelta(days=1)
+            yesterday_winners = [x for x in tiper_dne_log if x['Datum'] == yesterday]
+
+            if yesterday_winners:
+                st.write(f"**Vítězové ze dne {yesterday.strftime('%d.%m.')}:**")
+                st.dataframe(pd.DataFrame(yesterday_winners)[['Jméno', 'Body ten den', 'Bonus']], use_container_width=True, hide_index=True)
+            else:
+                st.info(f"Za včerejšek ({yesterday.strftime('%d.%m.')}) nebyl udělen žádný bonus.")
+
+            with st.expander("🏆 Celkový žebříček: Tiper Dne"):
+                td_data = [{"Jméno": u['Jmeno'], "Celkem Bonus": bonus_tiper_dne.get(str(u['Email']), 0)} for u in users if bonus_tiper_dne.get(str(u['Email']), 0) > 0]
+                if td_data:
+                    st.dataframe(pd.DataFrame(td_data).sort_values("Celkem Bonus", ascending=False), use_container_width=True, hide_index=True)
+                else:
+                    st.write("Zatím nikdo.")
+
+        with col_spec2:
+            st.markdown("#### 🦁 Bonus za Odvahu")
+            st.caption("Hráči, kteří trefili vítěze, na kterého sázelo **méně než 20 %** lidí (+1 bod).")
+
+            odvaha_data = [{"Jméno": u['Jmeno'], "Body za Odvahu": bonus_odvaha.get(str(u['Email']), 0)} for u in users if bonus_odvaha.get(str(u['Email']), 0) > 0]
+
+            if odvaha_data:
+                st.dataframe(pd.DataFrame(odvaha_data).sort_values("Body za Odvahu", ascending=False), use_container_width=True, hide_index=True)
+            else:
+                st.info("Zatím se nenašel žádný odvážlivec, který by trefil překvapení.")
+
+        st.divider()
+
+        # --- PŮVODNÍ STATISTIKY ---
+        st.subheader("🍀 Šťastná ruka & 💀 Zabiják tiketů")
+        st.caption("Zápasy s nejvyšším a nejnižším průměrem bodů na hráče.")
+
+        if finished_matches:
+            # Přepočet statistik pro zápasy
+            match_stats = []
+            for z in finished_matches:
+                tips_for_z = tips_by_match.get(z['ID'], [])
+                if not tips_for_z: continue
+
+                total_pts = 0; count = 0
+                faze_lower = str(z.get('Faze', '')).lower()
+                is_playoff = any(x in faze_lower for x in ["playoff", "finále", "o 3. místo", "čtvrtfinále", "semifinále"])
+
+                for t in tips_for_z:
+                    # Zde musíme použít správnou funkci pro výpočet bodů, kterou jsme definovali dříve (včetně OT)
+                    p, _, _, _ = spocitej_body_zapas(
+                        t['Tip_Domaci'], t['Tip_Hoste'], z['Skore_Domaci'], z['Skore_Hoste'], 
+                        z['Domaci'], z['Hoste'], z.get('Faze',''),
+                        t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
+                    )
+                    total_pts += p; count += 1
+
+                if count > 0:
+                    match_stats.append({
+                        'Zápas': f"{z['Domaci']} - {z['Hoste']}",
+                        'Skóre': f"{z['Skore_Domaci']}:{z['Skore_Hoste']}",
+                        'Průměr': total_pts / count,
+                        'Fáze': 'Playoff' if is_playoff else 'Základní část'
+                    })
+
+            if match_stats:
+                df_stats = pd.DataFrame(match_stats)
+                summary_rows = []
+
+                def add_extremes(subset, label_prefix):
+                    if subset.empty: return
+                    best = subset.loc[subset['Průměr'].idxmax()]
+                    worst = subset.loc[subset['Průměr'].idxmin()]
+
+                    summary_rows.append({"Fáze": label_prefix, "Kategorie": "Nejvyšší bodový průměr", "Zápas": best['Zápas'], "Výsledek": best['Skóre'], "Průměr bodů": f"{best['Průměr']:.2f}"})
+                    summary_rows.append({"Fáze": label_prefix, "Kategorie": "Nejnižší bodový průměr", "Zápas": worst['Zápas'], "Výsledek": worst['Skóre'], "Průměr bodů": f"{worst['Průměr']:.2f}"})
+
+                add_extremes(df_stats[df_stats['Fáze'] == 'Základní část'], "Základní část")
+                add_extremes(df_stats[df_stats['Fáze'] == 'Playoff'], "Playoff (x1.5)")
+
+                if summary_rows:
+                    df_summary = pd.DataFrame(summary_rows)
+                    st.dataframe(df_summary.style.set_properties(**{'text-align': 'center'}).set_table_styles([dict(selector='th', props=[('text-align', 'center')])]), use_container_width=True, hide_index=True)
+        else:
+            st.info("Zatím nejsou k dispozici data z odehraných zápasů.")
+
+        st.divider()
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("🎯 Nejvíc přesných tipů")
+            df_ex = pd.DataFrame([{"Jméno": u['Jmeno'], "Trefy": exact_matches.get(str(u['Email']), 0)} for u in users]).sort_values("Trefy", ascending=False)
+            st.dataframe(df_ex.style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
+        with c2:
+            st.subheader("📊 Úspěšnost tipů")
+            sd = []
+            for u in users:
+                sc = matches_scored.get(str(u['Email']), 0)
+                perc = (sc/len(finished_matches)*100) if finished_matches else 0
+                sd.append({"Jméno": u['Jmeno'], "Úspěšnost": f"{perc:.1f}%", "_s": perc})
+            st.dataframe(pd.DataFrame(sd).sort_values("_s", ascending=False).drop(columns=["_s"]).style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
+
+        st.divider()
+        c3, c4 = st.columns(2)
+        with c3:
+            st.subheader("👑 Král Základní části")
+            sb = pd.DataFrame([{"Jméno": u['Jmeno'], "Body": stats_basic.get(str(u['Email']), 0)} for u in users]).sort_values("Body", ascending=False)
+            st.dataframe(sb.style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
+        with c4:
+            st.subheader("🔥 Král Playoff")
+            sp = pd.DataFrame([{"Jméno": u['Jmeno'], "Body": stats_playoff.get(str(u['Email']), 0)} for u in users]).sort_values("Body", ascending=False)
+            st.dataframe(sp.style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.subheader("🌐 Koho tipujem na medaile?")
+        all_winners = [u.get('Tip_Vitez') for u in users if u.get('Tip_Vitez')]
+        all_medals = [m for u in users for m in [u.get('Tip_Med1'), u.get('Tip_Med2'), u.get('Tip_Med3')] if m]
+
+        col_g1, col_g2 = st.columns(2)
+        with col_g1:
+            if all_winners:
+                st.write("**Favorité na ZLATO**")
+                win_counts = pd.Series(all_winners).value_counts().reset_index()
+                win_counts.columns = ['Tým', 'Počet hlasů']
+                win_counts.index += 1
+                st.dataframe(win_counts.style.set_properties(**{'text-align': 'center'}), use_container_width=True)
+        with col_g2:
+            if all_medals:
+                st.write("**Favorité na MEDAILE**")
+                med_counts = pd.Series(all_medals).value_counts().reset_index()
+                med_counts.columns = ['Tým', 'Počet hlasů']
+                med_counts.index += 1
+                st.dataframe(med_counts.style.set_properties(**{'text-align': 'center'}), use_container_width=True)
+
+    # 6. PROFIL
+    with t_prof:
+        st.header("Můj profil")
+        current_u_idx = next((i for i, u in enumerate(users) if str(u['Email']) == st.session_state['user_email']), None)
+
+        if current_u_idx is not None:
+            current_data = users[current_u_idx]
+            curr_team = current_data.get('Tym', '')
+            all_existing_teams = sorted(list(set([u.get('Tym', '') for u in users if u.get('Tym', '') != ''])))
+
+            # A. ZMĚNA ÚDAJŮ
+            with st.form("prof"):
+                st.subheader("Osobní údaje")
+                # Zobrazení ID a Jména
+                st.write(f"🆔 Tvoje hráčské ID: **{current_data.get('ID', 'N/A')}**")
+                st.caption("Toto ID uváděj do poznámky při platbě startovného.")
+                st.write(f"Jméno hráče: **{current_data['Jmeno']}**")
+
+                st.divider()
+                st.subheader("Týmová příslušnost")
+                st.write(f"Aktuální tým: **{curr_team if curr_team else 'Žádný'}**")
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    sel = st.selectbox("Přidat se k týmu", ["- Vyber -"] + all_existing_teams)
+                    final_team = sel if sel != "- Vyber -" else curr_team
+                with c2:
+                    new_t = st.text_input("Nebo založit nový")
+                    if new_t: final_team = new_t
+
+                if st.form_submit_button("💾 Uložit změnu týmu"):
+                    row_idx = current_u_idx + 2
+                    # Aktualizujeme POUZE sloupec 6 (Tým), sloupec 2 (Jméno) necháváme být
+                    updates = [gspread.Cell(row_idx, 6, final_team)]
+                    try:
+                        ws_users.update_cells(updates)
+                        # st.session_state['user_name'] už neměníme
+                        st.session_state['user_team'] = final_team
+                        st.cache_data.clear()
+                        st.success("✅ Tým byl úspěšně aktualizován!")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e: st.error(f"Chyba při ukládání: {e}")
+
+            st.divider()
+
+            # B. ZMĚNA HESLA (NOVÉ)
+            with st.form("pass_change"):
+                st.subheader("Změna hesla")
+                p_old = st.text_input("Staré heslo", type="password")
+                p_new = st.text_input("Nové heslo", type="password")
+                p_new2 = st.text_input("Kontrola nového hesla", type="password")
+
+                if st.form_submit_button("🔐 Změnit heslo"):
+                    # Ověření starého hesla
+                    if check_password(p_old, current_data['Heslo']):
+                        if p_new == p_new2:
+                            if len(p_new) > 0:
+                                new_hash = make_hash(p_new)
+                                ws_users.update_cell(current_u_idx + 2, 3, new_hash) # Sloupec 3 je Heslo
+                                st.cache_data.clear()
+                                st.success("Heslo úspěšně změněno!")
+                            else:
+                                st.error("Heslo nesmí být prázdné.")
+                        else:
+                            st.error("Nová hesla se neshodují.")
+                    else:
+                        st.error("Staré heslo není správné.")
+
+    # 7. PRAVIDLA
+    with t_rules:
+        st.header("Pravidla hry")
+        st.markdown("""
+        * **Zápasy do rozhodnutí:** Tipujeme výsledek po konci zápasu (včetně prodloužení/nájezdů), takže nejsou možné remízy.
+        * **Bodování:**
+            * Základ je **7 bodů**.
+            * Za každý rozdíl v gólech domácích a hostů se odečítá **1 bod**.
+            * Minimální počet bodů při správném určení vítěze jsou **2 body**.
+            * **+2 body** bonus za trefení přesného výsledku.
+            * **+2 body** bonus, pokud hraje Česko.
+        * **Playoff:** Všechny body za zápas se násobí **1.5x** (kromě českého bonusu).
+        * **Tipy na medailisty:**
+            * **+15 bodů** za vítěze turnaje.
+            * **+4 body** za každého trefeného medailistu.
+        * **Tiper dne**
+            * Ten kdo za daný hrací den získal nejvíce bodů, získává navíc bonus **0,5 bodu** za každý odehraný zápas v tomto dnu. Bonus může získat více hráčů.
+        * **Bonus za odvahu**
+            * Pokud zvolíte za vítěze zápasu tým, který tipuje méně než 20 % tipujcích, tak při výhře tohoto týmu získáváte navíc bonus **+1 bod**.
+        * **Další bonusy:**
+            * **+6 bodů** pro "Ostrostřelce" (hráč s nejvíce přesnými tipy na konci turnaje).
+            * Pokud si tipneš, že zápas půjde do prodloužení/nájezdů a budeš mít pravdu, získáš **+1 bod**. V opačném případě **1 bod** ztrácíš.
+        """)
+        st.caption("Made by MiBo | Kontakt: tipovacka.mibo@gmail.com")
+
+    # 8. HISTORIE (ROZDĚLENÁ)
+    with t_history:
+        st.header("Síň slávy - Historické výsledky")
+        st.markdown("Přehled vítězů a medailistů z minulých turnajů.")
+
+        col_hist_h, col_hist_f = st.columns(2)
+
+        with col_hist_h:
+            st.subheader("🏒 Hokej")
+            history_hockey = [
+                {"Rok": 2025, "Turnaj": "MS - Švédsko/Dánsko", "🥇 1. Místo": "Brácha Tyrdy", "🥈 2. Místo": "Lukáš", "🥉 3. Místo": "Antonín"},
+                {"Rok": 2024, "Turnaj": "MS - Česko", "🥇 1. Místo": "Luděk / Příbor", "🥈 2. Místo": "-", "🥉 3. Místo": "Tony B."},
+                {"Rok": 2023, "Turnaj": "MS - Finsko/Lotyšsko", "🥇 1. Místo": "Tyrda", "🥈 2. Místo": "MiBo", "🥉 3. Místo": "Honza K."},
+                {"Rok": 2022, "Turnaj": "MS - Finsko", "🥇 1. Místo": "Lukáš", "🥈 2. Místo": "Tonda V.", "🥉 3. Místo": "MiBo"},
+                {"Rok": 2022, "Turnaj": "ZOH - Čína", "🥇 1. Místo": "Kedárek", "🥈 2. Místo": "MiBo", "🥉 3. Místo": "Kedar"},
+                {"Rok": 2021, "Turnaj": "MS - Lotyšsko", "🥇 1. Místo": "Honza Geryk", "🥈 2. Místo": "Peťa údržbář", "🥉 3. Místo": "Janča"},
+                {"Rok": 2019, "Turnaj": "MS - Slovensko", "🥇 1. Místo": "Lukáš", "🥈 2. Místo": "MiBo", "🥉 3. Místo": "Honza K."},
+                {"Rok": 2018, "Turnaj": "MS - Dánsko", "🥇 1. Místo": "Dominik", "🥈 2. Místo": "Lukáš", "🥉 3. Místo": "Tonda V."},
+                {"Rok": 2017, "Turnaj": "MS - Němesko/Francie", "🥇 1. Místo": "Lukáš", "🥈 2. Místo": "Tonda V.", "🥉 3. Místo": "MiBo"},
+                {"Rok": 2016, "Turnaj": "MS - Rusko", "🥇 1. Místo": "Vlasta", "🥈 2. Místo": "Kuba H.", "🥉 3. Místo": "MiBo"},
+            ]
+            df_hist_h = pd.DataFrame(history_hockey)
+            st.dataframe(df_hist_h.style.set_properties(**{'text-align': 'center'}).set_table_styles([dict(selector='th', props=[('text-align', 'center')])]), use_container_width=True, hide_index=True)
+
+        with col_hist_f:
+            st.subheader("⚽ Fotbal")
+            history_football = [
+                {"Rok": 2024, "Turnaj": "EURO - Německo", "🥇 1. Místo": "Brácha Tyrdy", "🥈 2. Místo": "Antonín", "🥉 3. Místo": "Tyrda"},
+                {"Rok": 2022, "Turnaj": "MS - Katar", "🥇 1. Místo": "Tony B.", "🥈 2. Místo": "Lukáš", "🥉 3. Místo": "MiBo"},
+                {"Rok": 2021, "Turnaj": "EURO - 11 zemí", "🥇 1. Místo": "Dominik", "🥈 2. Místo": "Kedar", "🥉 3. Místo": "Tony B."},
+                {"Rok": 2016, "Turnaj": "EURO - Francie", "🥇 1. Místo": "Vojta H.", "🥈 2. Místo": "Ondra T.", "🥉 3. Místo": "Luděk"},
+            ]
+            df_hist_f = pd.DataFrame(history_football)
+            st.dataframe(df_hist_f.style.set_properties(**{'text-align': 'center'}).set_table_styles([dict(selector='th', props=[('text-align', 'center')])]), use_container_width=True, hide_index=True)
+        st.subheader("Pořadí hráčů")
+        st.markdown("Historická úspěšnost hráčů napříč všemi turnaji (seřazeno dle medailí: 🥇 > 🥈 > 🥉).")
+
+        # 1. Agregace dat
+        # Sloučíme oba seznamy do jednoho
+        all_history = history_hockey + history_football
+        medal_stats = {}
+
+        def add_medal(name_raw, type_medal):
+            # Ošetření pro dělená místa (např. "Luděk / Příbor")
+            names = [n.strip() for n in str(name_raw).split('/')]
+            for name in names:
+                if name in ["-", "", None]: continue
+
+                # Normalizace jmen (volitelné - sjednotí např. "Tony" a "Tony B." pokud chceš, zatím nechávám raw)
+                key = name
+
+                if key not in medal_stats:
+                    medal_stats[key] = {'🥇 Zlato': 0, '🥈 Stříbro': 0, '🥉 Bronz': 0, 'Celkem': 0}
+
+                medal_stats[key][type_medal] += 1
+                medal_stats[key]['Celkem'] += 1
+
+        for row in all_history:
+            add_medal(row.get('🥇 1. Místo'), '🥇 Zlato')
+            add_medal(row.get('🥈 2. Místo'), '🥈 Stříbro')
+            add_medal(row.get('🥉 3. Místo'), '🥉 Bronz')
+
+        # 2. Převod na DataFrame
+        if medal_stats:
+            df_hall = pd.DataFrame.from_dict(medal_stats, orient='index').reset_index()
+            df_hall.columns = ['Hráč', '🥇 Zlato', '🥈 Stříbro', '🥉 Bronz', 'Celkem medailí']
+
+            # 3. Třídění (Olympijský systém: G > S > B)
+            df_hall = df_hall.sort_values(by=['🥇 Zlato', '🥈 Stříbro', '🥉 Bronz'], ascending=False).reset_index(drop=True)
+            df_hall.index += 1 # Pořadí od 1.
+
+            # Zobrazení
+            st.dataframe(df_hall.style.set_properties(**{'text-align': 'center'}), use_container_width=True)
+        else:
+            st.info("Zatím nejsou data pro výpočet síně slávy.")
+
+        me_email = st.session_state.get('user_email', '')
+        if "mibo" in me_email.lower():
+                st.info("💡 **Zajímavost:** Hráč **MiBo** má na kontě neuvěřitelných 7 medailí z obou sportů (4x🥈, 3x🥉). To už je skoro prokletí! 😅")    
+    # 10. DISKUZE
+    with t_chat:
+        # Jakmile uživatel otevře tuto záložku, uložíme si, že viděl všechny aktuální zprávy
+        st.session_state['chat_seen_count'] = len(chat_data)
+
+        st.header("🗣️ Diskuze")
+
+        # --- LOGIKA NAČÍTÁNÍ VÍCE ZPRÁV ---
+        # Inicializace počítadla v session state, pokud tam není
+        if 'chat_limit' not in st.session_state:
+            st.session_state['chat_limit'] = 30
+
+        # Kolik zpráv máme celkem v DB?
+        total_msgs = len(chat_data)
+        # Kolik jich teď chceme zobrazit?
+        current_limit = st.session_state['chat_limit']
+
+        st.caption(f"Místo pro hecování, analýzy a trash-talk. Zobrazuji posledních **{min(current_limit, total_msgs)}** zpráv.")
+
+        # A) VSTUPNÍ POLE
+        with st.form("chat_input_form", clear_on_submit=True):
+            col_ch1, col_ch2 = st.columns([5, 1], vertical_alignment="bottom")
+            new_msg = col_ch1.text_input("Napiš zprávu...", key="chat_msg_input", placeholder="Kdo neskáče není Čech...")
+            sent = col_ch2.form_submit_button("Odeslat ✈️")
+
+            if sent and new_msg:
+                prague_tz = pytz.timezone('Europe/Prague')
+                now_str = datetime.now(prague_tz).strftime("%d.%m. %H:%M")
+                user_nm = st.session_state['user_name']
+                try:
+                    ws_chat.append_row([now_str, user_nm, new_msg])
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as e: st.error(f"Chyba: {e}")
+
+        st.divider()
+
+        # B) VÝPIS ZPRÁV
+        chat_container = st.container()
+        with chat_container:
+            if not chat_data:
+                st.info("Zatím tu je ticho... Buď první!")
+            else:
+                # Vezmeme posledních X zpráv podle limitu (např. posledních 30, 60...)
+                msgs_to_show = chat_data[-current_limit:]
+
+                # Otočíme je, aby nejnovější byly nahoře
+                for msg in reversed(msgs_to_show): 
+                    is_me = (msg['Hrac'] == st.session_state['user_name'])
+                    avatar = "😎" if is_me else "👤"
+                    with st.chat_message(name=msg['Hrac'], avatar=avatar):
+                        st.write(f"**{msg['Hrac']}** <small style='color:grey'>({msg['Datum']})</small>", unsafe_allow_html=True)
+                        st.write(msg['Zprava'])
+
+        # C) TLAČÍTKO "NAČÍST DALŠÍ"
+        # Zobrazíme ho jen, pokud máme v záloze víc zpráv, než kolik zrovna ukazujeme
+        if total_msgs > current_limit:
+            st.write("---")
+            if st.button(f"Načíst dalších 30 starších zpráv 📜 ({total_msgs - current_limit} zbývá)"):
+                st.session_state['chat_limit'] += 30
+                st.rerun()
+    # 9. STARTOVNÉ
+    with t_bank:
+        st.header("Startovné, Bank a Výhry")
+        me = next((u for u in users if str(u['Email']) == st.session_state['user_email']), None)
+        zaplaceno = str(me.get('Zaplaceno', 'NE')).upper() if me else 'NE'
+        ENTRY_FEE = 150
+        total_paid = sum(1 for u in users if str(u.get('Zaplaceno','')).upper() == 'ANO')
+        bank_total = total_paid * ENTRY_FEE
+
+        if zaplaceno == 'ANO': st.success("✅ Tvé startovné je ZAPLACENO.")
+        else: st.warning("❌ Startovné zatím NENÍ uhrazeno.")
+
+        st.divider()
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("Platební údaje")
+            my_id = me.get('ID', '?') if me else '?'
+            st.write("**Číslo účtu:** 1596874001/2700"); st.write(f"**Částka:** {ENTRY_FEE} Kč")
+            st.markdown(f"**Poznámka pro příjemce:** `{st.session_state['user_name']} (ID: {my_id})`")
+            st.caption("Prosím uveď ID, ať platbu snadno spárujeme.")
+            if os.path.exists("qr_platba.jpeg"):
+                st.image("qr_platba.jpeg", caption="QR Platba", width=250)
+            else:
+                st.info("QR kód není nahrán.")
+        with c2:
+            st.subheader("Aktuální rozdělení výher")
+
+            # Definice banků (60% / 20% / 10% - zbývá 10% rezerva/poplatky)
+            pot_1 = int(bank_total * 0.6)
+            pot_2 = int(bank_total * 0.2)
+            pot_3 = int(bank_total * 0.1)
+
+            # Logika dělení (Split Pot)
+            # Spočítáme, kolik lidí je na 1., 2. a 3. místě
+            c1 = len(df_rank[df_rank['Pořadí'] == 1])
+            c2 = len(df_rank[df_rank['Pořadí'] == 2])
+            c3 = len(df_rank[df_rank['Pořadí'] == 3])
+
+            # --- VÝPOČET PRO 1. MÍSTO ---
+            prize_1 = 0
+            desc_1 = ""
+            if c1 == 1:
+                prize_1 = pot_1
+            elif c1 > 1:
+                # Dělí se o 1. místo a další místa pod tím
+                pool = pot_1
+                if c1 >= 2: pool += pot_2 # Pokud jsou 2 a víc, berou i stříbro
+                if c1 >= 3: pool += pot_3 # Pokud jsou 3 a víc, berou i bronz
+                prize_1 = int(pool / c1)
+                desc_1 = f"(Dělená výhra: {c1} hráči)"
+
+            # --- VÝPOČET PRO 2. MÍSTO ---
+            # Existuje jen pokud je na 1. místě sám
+            prize_2 = 0
+            desc_2 = ""
+            if c1 == 1:
+                if c2 == 1:
+                    prize_2 = pot_2
+                elif c2 > 1:
+                    # Dělí se o 2. a 3. místo
+                    pool = pot_2
+                    if c2 >= 2: pool += pot_3
+                    prize_2 = int(pool / c2)
+                    desc_2 = f"(Dělená výhra: {c2} hráči)"
+
+            # --- VÝPOČET PRO 3. MÍSTO ---
+            # Existuje jen pokud 1. a 2. místo obsadili max 2 lidé dohromady
+            prize_3 = 0
+            desc_3 = ""
+            slots_taken = c1 + (c2 if c1 == 1 else 0) # Kolik pozic je zabráno před bronzem
+
+            if slots_taken < 3: 
+                # Bronz se rozděluje mezi všechny na 3. místě
+                if c3 > 0:
+                    prize_3 = int(pot_3 / c3)
+
+            # VÝPIS
+            st.write(f"🥇 **1. Místo:** {prize_1} Kč {desc_1}")
+            if prize_2 > 0:
+                st.write(f"🥈 **2. Místo:** {prize_2} Kč {desc_2}")
+            else:
+                st.caption("🥈 2. Místo: - (bráno vítězi)")
+
+            if prize_3 > 0:
+                st.write(f"🥉 **3. Místo:** {prize_3} Kč {desc_3}")
+            else:
+                st.caption("🥉 3. Místo: - (bráno vyššími pozicemi)")
+
+    # --- ADMIN & MODERATOR PANEL ---
+    if is_admin and t_admin:
+        with t_admin:
+            st.header(f"Panel: {user_role.capitalize()}")
+
+            # 1. ZADÁVÁNÍ VÝSLEDKŮ
+            with st.expander("Výsledky zápasů", expanded=True):
+                z_names = [f"{z['ID']}: {z['Domaci']} vs {z['Hoste']}" for z in zapasy]
+                sel_z = st.selectbox("Vyber zápas", z_names)
+                sid = int(sel_z.split(":")[0])
+                with st.form("admin_score"):
+                    curr_z = next((x for x in zapasy if x['ID'] == sid), {})
+
+                    # Tady máme plnou šířku, takže 3 sloupce budou vypadat skvěle
+                    c1, c2, c3 = st.columns(3)
+                    d = c1.text_input("Góly Domácí", value=curr_z.get('Skore_Domaci', ''))
+                    h = c2.text_input("Góly Hosté", value=curr_z.get('Skore_Hoste', ''))
+
+                    curr_ot = str(curr_z.get('Prodlouzeni', 'NE')).upper()
+                    ot_val = c3.selectbox("Prodloužení?", ["NE", "ANO"], index=1 if curr_ot == "ANO" else 0, key=f"admin_ot_{sid}")
+
+                    if st.form_submit_button("💾 Uložit výsledek"):
+                        try:
+                            all_ids = ws_zapasy.col_values(1) 
+                            search_id = str(sid)
+                            if search_id in all_ids:
+                                row_idx = all_ids.index(search_id) + 1
+                                ws_zapasy.update_cell(row_idx, 5, d)
+                                ws_zapasy.update_cell(row_idx, 6, h)
+                                ws_zapasy.update_cell(row_idx, 8, ot_val)
+                                st.cache_data.clear(); st.success(f"✅ Výsledek zápasu {sid} uložen!"); time.sleep(1); st.rerun()
+                            else:
+                                st.error(f"❌ Chyba: ID zápasu '{sid}' nenalezeno.")
+                        except Exception as e: st.error(f"Chyba: {e}")
+
+            # 2. POUZE PRO HLAVNÍHO ADMINA
+            if user_role == 'admin':
+                col_ad1, col_ad2 = st.columns(2)
+
+                with col_ad1:
+                    with st.expander("Konec turnaje"):
+                        with st.form("af"):
+                            ht = get_all_teams(zapasy)
+                            def get_idx(val): return ht.index(val) if val in ht else 0
+                            w = st.selectbox("Vítěz", ht, index=get_idx(config.get('vitez_turnaje', '')))
+                            m1 = st.selectbox("Medaile 1", ht, index=get_idx(config.get('med_1', '')))
+                            m2 = st.selectbox("Medaile 2", ht, index=get_idx(config.get('med_2', '')))
+                            m3 = st.selectbox("Medaile 3", ht, index=get_idx(config.get('med_3', '')))
+                            if st.form_submit_button("Uzavřít turnaj"):
+                                def upd(k, v):
+                                    c = ws_nastaveni.find(k)
+                                    if c: ws_nastaveni.update_cell(c.row, 2, v)
+                                    else: ws_nastaveni.append_row([k, v])
+                                upd('vitez_turnaje', w); upd('med_1', m1); upd('med_2', m2); upd('med_3', m3)
+                                st.cache_data.clear(); st.success("Turnaj uzavřen!"); st.rerun()
+
+                with col_ad2:
+                    with st.expander("Správa plateb"):
+                        users_list = [f"[ID: {u.get('ID','?')}] {u['Jmeno']} ({u['Email']})" for u in users]
+                        sel_user_pay = st.selectbox("Vyber uživatele", users_list)
+                        sel_email = sel_user_pay.split(" (")[-1].replace(")", "")
+                        u_idx = next((i for i, u in enumerate(users) if str(u['Email']) == sel_email), 0)
+
+                        st.write(f"Stav: **{str(users[u_idx].get('Zaplaceno', 'NE'))}**")
+                        c_p1, c_p2 = st.columns(2)
+                        if c_p1.button("✅ Zaplaceno"):
+                            ws_users.update_cell(u_idx+2, 11, "ANO"); st.cache_data.clear(); st.success("OK"); time.sleep(0.5); st.rerun()
+                        if c_p2.button("❌ Nezaplaceno"):
+                            ws_users.update_cell(u_idx+2, 11, "NE"); st.cache_data.clear(); st.success("OK"); time.sleep(0.5); st.rerun()
+
+
+# PATIČKA
+st.markdown('<div class="footer-warning">⚠️ <b>Tip:</b> Pro pohyb v aplikaci používej záložky. Tlačítko Zpět nebo Refresh (F5) tě může odhlásit.</div>', unsafe_allow_html=True)
+
