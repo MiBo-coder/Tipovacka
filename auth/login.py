@@ -18,117 +18,110 @@ from utils.config import MAX_PLAYERS
 def render_login_page():
     """
     Renderuje přihlašovací stránku.
-    UPRAVENO: Odstraněny technické detaily, kapacity a souhlasy.
+    DESIGN UPDATE: Centrovaný úzký layout (Card UI).
     """
     # Načtení dat
     _, _, users, _, _ = load_all_data()
     ws_zapasy, ws_tipy, ws_users, ws_nastaveni, ws_chat = get_worksheets_resources()
     
-    # Taby pro přihlášení a registraci
-    tab_login, tab_reg = st.tabs(["🔑 Přihlášení", "📝 Registrace"])
+    # 1. HLAVNÍ SLOUPEC PRO CENTROVÁNÍ (Responsivní)
+    # Na mobilu to zabere víc místa, na desktopu jen střed.
+    # Použijeme prázdné sloupce po stranách.
+    col_left, col_center, col_right = st.columns([1, 4, 1]) 
     
-    # --- TAB 1: PŘIHLÁŠENÍ ---
-    with tab_login:
-        with st.form("login_form"):
-            email = st.text_input("Email")
-            password = st.text_input("Heslo", type="password")
-            submit = st.form_submit_button("Vstoupit")
-            
-            if submit:
-                # Rate limiting kontrola
-                allowed, error_msg = check_login_attempts()
-                if not allowed:
-                    st.error(error_msg)
-                    return
-                
-                # Validace prázdných polí
-                if not email or not password:
-                    st.error("Vyplňte všechna pole.")
-                    record_failed_login()
-                    return
-                
-                # Hledání uživatele
-                clean_email = email.strip().lower()
-                user_match = None
-                user_idx = None
-                
-                for idx, u in enumerate(users):
-                    if str(u['Email']).strip().lower() == clean_email:
-                        user_match = u
-                        user_idx = idx
-                        break
-                
-                # Ověření hesla
-                if user_match and verify_password(password, user_match.get('Heslo', '')):
-                    # Kontrola, zda je účet povolen
-                    if str(user_match.get('Povoleno', 'ANO')).upper() != 'ANO':
-                        st.error("Váš účet byl deaktivován. Kontaktujte správce.")
-                        return
-                    
-                    # AUTOMATICKÁ MIGRACE HESEL (SHA-256 → bcrypt) - SILENT MODE
-                    old_hash = user_match.get('Heslo', '')
-                    if len(old_hash) == 64 and not old_hash.startswith('$'):
-                        # Je to starý SHA-256 hash, upgradujeme na bcrypt (uživateli nic neříkáme)
-                        new_hash = hash_password(password)
-                        update_user_password(ws_users, user_idx, new_hash)
-                    
-                    # Úspěšné přihlášení
-                    record_successful_login()
-                    
-                    st.session_state.update({
-                        'logged_in': True,
-                        'user_email': str(user_match['Email']),
-                        'user_name': user_match.get('Jmeno', 'Hráč'),
-                        'user_team': user_match.get('Tym', ''),
-                        'user_role': user_match.get('Role', 'user')
-                    })
-                    
-                    st.success("Přihlášení úspěšné!")
-                    time.sleep(0.5)
-                    st.rerun()
-                else:
-                    # Neúspěšné přihlášení
-                    record_failed_login()
-                    st.error("Chyba přihlášení.")
-        
-        # --- OBNOVA HESLA ---
-        with st.expander("🆘 Zapomněl jsi heslo?"):
-            st.caption("Zadej svůj email. Pokud ho v systému najdeme, pošleme ti na něj nové dočasné heslo.")
-            st.info("💡 Pokud ti email nedorazí do 2 hodin, napiš mi prosím na: **tipovacka.mibo@gmail.com**")
-            reset_email = st.text_input("Tvůj registrační email", key="reset_mail_input")
-            
-            if st.button("🔄 Obnovit heslo"):
-                clean_reset_email = reset_email.strip().lower()
-                
-                # Kontrola, zda email existuje v načtených uživatelích
-                user_exists = any(
-                    str(u.get('Email')).strip().lower() == clean_reset_email 
-                    for u in users
-                )
-                
-                if user_exists:
-                    try:
-                        create_reset_request(clean_reset_email)
-                        st.success("✅ Požadavek odeslán! Během chvilky ti dorazí email s novým heslem.")
-                    except Exception as e:
-                        st.error(f"Chyba při odesílání požadavku: {e}")
-                else:
-                    st.error("Tento email v naší databázi neevidujeme.")
+    # Pokud je obrazovka široká (desktop), zúžíme prostřední sloupec ještě víc
+    # (Streamlit neumí detekovat zařízení, ale poměr 1:2:1 je na desktop fajn, na mobilu se to "slepí" pod sebe)
+    # Pro lepší kontrolu použijeme vnořené sloupce uvnitř col_center, pokud by to bylo moc široké.
+    # Ale pro začátek zkusíme poměr [1, 2, 1] na celý layout.
     
-    # --- TAB 2: REGISTRACE ---
-    with tab_reg:
-        # ODSTRANĚNO: Kontrola kapacity a zobrazování počtu volných míst
+    # UPDATE: Aby to bylo opravdu úzké "jako karta", dáme poměr [1, 1.5, 1] nebo i [2, 3, 2]
+    # Zkusíme raději čistší přístup - vložíme obsah přímo do st.tabs a ty omezíme.
+    
+    st.write("") # Odsazení shora
+    
+    # Layout: Prázdno | Taby | Prázdno
+    c1, c2, c3 = st.columns([1, 2, 1])
+    
+    with c2:
+        # Taby pro přihlášení a registraci
+        tab_login, tab_reg = st.tabs(["🔑 Přihlášení", "📝 Registrace"])
         
-        with st.form("register_form", clear_on_submit=True):
-            reg_email = st.text_input("Email", key="reg_email")
-            reg_name = st.text_input("Jméno (zobrazované ve hře)", key="reg_name")
-            reg_pass1 = st.text_input("Heslo", type="password", key="reg_pass1")
-            reg_pass2 = st.text_input("Potvrďte heslo", type="password", key="reg_pass2")
+        # --- TAB 1: PŘIHLÁŠENÍ ---
+        with tab_login:
+            st.write("") # Malá mezera
+            with st.form("login_form"):
+                email = st.text_input("Email")
+                password = st.text_input("Heslo", type="password")
+                
+                st.write("") # Mezera před tlačítkem
+                # use_container_width=True roztáhne tlačítko na šířku sloupce (formuláře)
+                submit = st.form_submit_button("Vstoupit", use_container_width=True)
+                
+                if submit:
+                    # Rate limiting
+                    allowed, error_msg = check_login_attempts()
+                    if not allowed:
+                        st.error(error_msg); return
+                    
+                    if not email or not password:
+                        st.error("Vyplňte všechna pole."); record_failed_login(); return
+                    
+                    clean_email = email.strip().lower()
+                    user_match = None; user_idx = None
+                    
+                    for idx, u in enumerate(users):
+                        if str(u['Email']).strip().lower() == clean_email:
+                            user_match = u; user_idx = idx; break
+                    
+                    if user_match and verify_password(password, user_match.get('Heslo', '')):
+                        if str(user_match.get('Povoleno', 'ANO')).upper() != 'ANO':
+                            st.error("Účet deaktivován."); return
+                        
+                        # Migrace hesla
+                        old_hash = user_match.get('Heslo', '')
+                        if len(old_hash) == 64 and not old_hash.startswith('$'):
+                            new_hash = hash_password(password)
+                            update_user_password(ws_users, user_idx, new_hash)
+                        
+                        record_successful_login()
+                        st.session_state.update({
+                            'logged_in': True, 'user_email': str(user_match['Email']),
+                            'user_name': user_match.get('Jmeno', 'Hráč'),
+                            'user_team': user_match.get('Tym', ''), 'user_role': user_match.get('Role', 'user')
+                        })
+                        st.success("Přihlášení úspěšné!"); time.sleep(0.5); st.rerun()
+                    else:
+                        record_failed_login(); st.error("Chyba přihlášení.")
             
-            # ODSTRANĚNO: Caption o bcrypt šifrování
-            # ODSTRANĚNO: Checkbox souhlasu s pravidly
-            
-            submit_reg = st.form_submit_button("Registrovat")
+            # --- OBNOVA HESLA (Mimo formulář, menší a decentní) ---
+            st.write("")
+            with st.expander("Zapomněl jsi heslo?", expanded=False):
+                st.caption("Pošleme ti nové dočasné heslo.")
+                st.info("💡 Pokud ti email nedorazí do 2 hodin, napiš mi prosím na: **tipovacka.mibo@gmail.com**")
+                reset_email = st.text_input("Tvůj registrační mail", key="reset_mail_input")
+                if st.button("Obnovit heslo", use_container_width=True):
+                    # ... (logika obnovy hesla zůstává stejná) ...
+                    clean_reset = reset_email.strip().lower()
+                    if any(str(u.get('Email')).strip().lower() == clean_reset for u in users):
+                        try:
+                            create_reset_request(clean_reset)
+                            st.success("Požadavek odeslán!")
+                        except Exception as e: st.error(f"Chyba: {e}")
+                    else:
+                        st.error("Email nenalezen.")
+
+        # --- TAB 2: REGISTRACE ---
+        with tab_reg:
+            st.write("")
+            with st.form("register_form", clear_on_submit=True):
+                # Stejný styl jako login
+                reg_email = st.text_input("Email", key="reg_email")
+                reg_name = st.text_input("Jméno/Přezdívka (zobrazované ve hře)", key="reg_name")
+                reg_pass1 = st.text_input("Heslo", type="password", key="reg_pass1")
+                reg_pass2 = st.text_input("Potvrzení hesla", type="password", key="reg_pass2")
+                
+                st.write("")
+                submit_reg = st.form_submit_button("Registrovat se", use_container_width=True)
             
             if submit_reg:
                 # Validace prázdných polí
