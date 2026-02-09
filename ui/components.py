@@ -11,94 +11,80 @@ from utils.config import FLAGS_ISO
 def apply_custom_css():
     """
     Aplikuje KOMPLETNÍ CSS styl pro aplikaci.
+    UPDATE: Oprava zmizelých popisků (Login) + Černý text pro všechny inputy.
     """
+    st.markdown('<style>@import url("https://fonts.googleapis.com/css2?family=Montserrat:wght@800&family=Roboto:wght@400;500;700&display=swap");</style>', unsafe_allow_html=True)
+    
     st.markdown("""
 <style>
-    /* Zvětšení písma */
+    /* 0. FIXY */
+    .stApp a[href^="#"] { display: none !important; }
+    
+    /* 1. GLOBÁL */
     html, body, [class*="css"] {
-        font-size: 18px !important;
+        font-family: 'Roboto', sans-serif;
+        color: #1a1a1a !important; 
     }
-    
-    /* MODRÉ INPUTY - AGRESIVNÍ STYL (Oprava pro tvůj požadavek) */
-    /* Samotné políčko pro zadávání čísel */
-    div[data-testid="stNumberInput"] input {
-        background-color: #e8f4f8 !important; 
-        color: black !important; 
-        font-weight: bold !important;
-        border: 1px solid #89cff0 !important;
-    }
-    /* Celý kontejner inputu */
+    .stApp { background-color: #ffffff; }
+
+    /* 2. INPUTY (CHLÍVKY) - OBECNÝ KONTEJNER */
     div[data-baseweb="input"] {
-        background-color: #e8f4f8 !important;
-        border: 1px solid #89cff0 !important;
-        border-radius: 5px !important;
-    }
-    /* Selectboxy (rozbalovátka) */
-    div[data-baseweb="select"] > div, div[data-testid="stSelectbox"] > div > div {
-        background-color: #e8f4f8 !important; 
-        border: 1px solid #89cff0 !important; 
-        color: black !important;
-        border-radius: 5px !important;
-    }
-    /* Tlačítka +/- u čísel */
-    button[data-testid="stNumberInputStepDown"], button[data-testid="stNumberInputStepUp"] {
-        background-color: #d1ecf1 !important; 
-        color: black !important;
-        border: 1px solid #89cff0 !important;
+        background-color: #e0f2fe !important; /* SVĚTLE MODRÁ */
+        border: 2px solid #475569 !important;
+        border-radius: 8px !important;
     }
 
-    /* Ostatní styly */
-    .exact-match {
-        background-color: #ffd700;
-        color: black;
-        font-weight: bold;
-        padding: 4px;
-        border-radius: 4px;
-    }
-    
-    .stNumberInput {
-        max-width: 150px;
-    }
-    
-    /* Zarovnání tabulek na střed */
-    .dataframe { text-align: center !important; }
-    th { text-align: center !important; }
-    td { text-align: center !important; }
-    .stDataFrame { text-align: center !important; }
-    
-    /* Box pro nejbližší zápas */
-    .next-match-box {
-        background-color: rgba(232, 244, 248, 0.95) !important;
-        border-left: 8px solid #007bff !important;
-        border: 1px solid #007bff !important;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.3) !important;
-        color: #000 !important; padding: 20px !important;
-        margin-bottom: 20px;
-    }
-    
-    /* Patička */
-    .footer-warning {
-        margin-top: 50px;
-        padding: 10px;
-        background-color: rgba(255, 243, 205, 0.9);
-        border: 1px solid #ffeeba;
-        color: #856404;
-        border-radius: 5px;
-        text-align: center;
-        font-size: 0.8em;
+    /* 2a. ČÍSELNÉ INPUTY (Karta zápasu) */
+    input[type="number"] {
+        background-color: transparent !important;
+        color: #000000 !important;
+        font-weight: 900 !important;
+        font-size: 1.4rem !important;
+        text-align: center !important;
+        padding-right: 0 !important;
+        -webkit-text-fill-color: #000000 !important;
     }
 
-    /* Úprava nadpisů */
-    .stApp h1 { text-align: center !important; }
-    
-    /* Checkboxy */
-    div[data-testid="stCheckbox"] label p {
-        color: black !important;
+    /* 2b. TEXTOVÉ INPUTY (Login, Registrace) */
+    input[type="text"], input[type="password"] {
+        background-color: transparent !important;
+        color: #000000 !important;       /* Černý text */
+        font-weight: 500 !important;
+        font-size: 1rem !important;
+        -webkit-text-fill-color: #000000 !important;
+        caret-color: #000000 !important; /* Černý kurzor */
+    }
+
+    /* Focus stavy */
+    div[data-baseweb="input"]:focus-within {
+        background-color: #ffffff !important;
+        border-color: #2563eb !important;
+    }
+
+    /* 3. CHECKBOX */
+    div[data-testid="stCheckbox"] {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        width: 100%;
+    }
+    div[data-baseweb="checkbox"] {
+        justify-content: center;
+    }
+    div[data-baseweb="checkbox"] label {
+        font-size: 1rem !important;
         font-weight: 600 !important;
+        color: #1e293b !important;
+        margin-left: 10px;
     }
+
+    /* 4. OSTATNÍ */
+    div[data-baseweb="tab-list"] { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+    div[data-baseweb="tab"] { flex: 0 1 auto !important; font-size: 1rem !important; font-weight: 600 !important; }
+    div.block-container { background-color: rgba(255, 255, 255, 0.95); padding: 3rem 1rem; border-radius: 16px; max-width: 1200px; }
+    .footer-warning { margin-top: 40px; padding: 15px; background-color: #fffbeb; border: 1px solid #fcd34d; color: #92400e; border-radius: 8px; font-size: 0.9em; text-align: center; font-weight: 500; }
 </style>
 """, unsafe_allow_html=True)
-
 
 def add_bg_from_local(image_file):
     """

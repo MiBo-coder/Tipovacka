@@ -306,36 +306,46 @@ def render_main_application():
     t_admin = all_tabs[10] if is_admin else None
 
     # 1. TIPOVÁNÍ
+    # 1. TIPOVÁNÍ
     with t_matches:
-        st.header("Tvoje tipy na jednotlivé zápasy")
+        # Zrušíme st.header, protože už máme velký nadpis v app.py, ať to není přeplácané
+        # st.header("Tvoje tipy na jednotlivé zápasy")
         
-        with st.expander("💡 Info k tipování (Remízy, prodloužení...) - Klikni pro nápovědu"):
+        with st.expander("💡 Info k zadávání tipů"):
             st.markdown("""
-            * Tipy můžeš ukládat průběžně a kdykoliv se k nim vrátit (až do začátku zápasu).
-            * **Remízy se neukládají!** Hokej se hraje do rozhodnutí, vždy musíš vybrat vítěze (např. 3:2).
-            * Pokud věříš v remízu po 60 minutách, nastav rozdíl skóre o 1 gól a zaškrtni "Bude se prodlužovat?".
-            * Stav **0:0** se bere jako "nenatipováno" a při ukládání se ignoruje (nehlásí chybu).
+            * Tipy se ukládají hromadně **tlačítkem dole**.
+            * **Není nutné** najednou natipovat všechny zápasy. K tipování se můžeš kdykoliv vrátit. Svoje tipy můžeš kdykoliv před začátkem zápasu změnit.
+            * **Hokej se hraje do rozhodnutí:** Musíš vybrat vítěze (např. 3:2).
+            * **Remíza po 60 min:** Nastav rozdíl o 1 gól (např. 2:3) a zaškrtni "Prodloužení".
+            * Stav **0:0** se ignoruje (bere se jako nenatipováno).
             """)
 
         moje_tipy_dict = {str(t['Zapas_ID']): t for t in tipy if str(t['Email']) == st.session_state['user_email']}
         
         with st.form("tips_form"):
             tips_to_save = {} 
-            # Pomocná mapa pro názvy zápasů
             match_names_map = {}
+
+            # Řazení zápasů podle data (volitelné, jinak bere pořadí z DB)
+            # zapasy.sort(key=lambda x: x['Datum_Obj'] or datetime.max)
 
             for z in zapasy:
                 zid = z['ID']
                 match_names_map[str(zid)] = f"{z['Domaci']} vs {z['Hoste']}"
 
+                # Příprava dat
                 d_obj = z.get('Datum_Obj')
                 d_str = d_obj.strftime("%d.%m. %H:%M") if d_obj else z['Datum']
-                label = f"{get_team_label(z['Domaci'])} - {get_team_label(z['Hoste'])}"
-                st.markdown(f"**{label}** <small>({d_str})</small>", unsafe_allow_html=True)
-
+                
+                # --- KLÍČOVÁ OPRAVA: DEFINICE PROMĚNNÝCH PŘED PODMÍNKOU ---
                 mt = moje_tipy_dict.get(str(zid), {})
+                # Bezpečné načtení hodnot (pokud neexistují, dáme 0 nebo prázdný string)
+                old_d = mt.get('Tip_Domaci', 0)
+                old_h = mt.get('Tip_Hoste', 0)
+                old_ot = mt.get('Tip_Prodlouzeni', '') 
+                # -----------------------------------------------------------
 
-                # LOGIKA ZAMČENÍ
+                # Kontrola zamčení
                 prague_tz = pytz.timezone('Europe/Prague')
                 now_prague = datetime.now(prague_tz)
                 match_dt = z.get('Datum_Obj')
@@ -344,65 +354,114 @@ def render_main_application():
 
                 is_locked = (match_dt and now_prague > match_dt)
                 is_played = (str(z['Skore_Domaci']) != "")
+                
+                # Label pro Expander
+                f_d = get_flag(z['Domaci'])
+                f_h = get_flag(z['Hoste'])
+                clock = "🔒" if (is_locked or is_played) else "⏱️"
+                
+                # Vytvoříme hezký label s vlajkami
+                card_label = f"{clock} {z['Domaci']} vs {z['Hoste']} ({d_str})"
 
-                if is_played or is_locked:
-                    # Výsledek (již nelze tipovat)
-                    p, ie, _, ot_p = spocitej_body_zapas(
-                        mt.get('Tip_Domaci'), mt.get('Tip_Hoste'), 
-                        z['Skore_Domaci'], z['Skore_Hoste'], 
-                        z['Domaci'], z['Hoste'], z.get('Faze',''),
-                        mt.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
-                    )
-                    ot_txt = f" (OT: {ot_p}b)" if ot_p != 0 else ""
-                    st.info(f"Výsledek: {z['Skore_Domaci']}:{z['Skore_Hoste']} | Tvůj tip: {mt.get('Tip_Domaci','-')}:{mt.get('Tip_Hoste','-')} | **{p}b** {ot_txt}")
-                else:
-                    # Formulář
-                    c1, c2, c3 = st.columns([1,1,3])
-                    old_d = mt.get('Tip_Domaci', 0)
-                    old_h = mt.get('Tip_Hoste', 0)
-                    old_ot = mt.get('Tip_Prodlouzeni', '') 
-
-                    v_d = c1.number_input("D", value=int(old_d) if old_d != "" else 0, key=f"d_{zid}", label_visibility="collapsed", min_value=0)
-                    v_h = c2.number_input("H", value=int(old_h) if old_h != "" else 0, key=f"h_{zid}", label_visibility="collapsed", min_value=0)
-                    is_checked = (str(old_ot).upper() == "ANO")
-                    v_ot = c3.checkbox("Bude se prodlužovat?", value=is_checked, key=f"ot_{zid}", help="Zaškrtni, pokud věříš, že zápas půjde do prodloužení.")
-
-                    # HTML varování u OT
-                    if v_ot and abs(v_d - v_h) != 1:
-                        c3.markdown("""<div style='color: #d9534f; font-weight: bold; text-shadow: 1px 1px 0 #fff;'>⚠️ Rozdíl není 1 gól.</div>""", unsafe_allow_html=True)
-                    elif v_ot:
-                        c3.markdown("""<div style='color: #28a745; font-weight: bold; text-shadow: 1px 1px 0 #fff;'>✅ Tip na OT aktivní.</div>""", unsafe_allow_html=True)
-
-                    tips_to_save[zid] = (v_d, v_h, "ANO" if v_ot else "")
-                st.write("---")
-
-            # --- MÍSTO PRO CHYBOVÉ HLÁŠKY (PŘÍMO NAD TLAČÍTKEM) ---
-            zpravy_placeholder = st.empty()
-            # ------------------------------------------------------
-
-            if st.form_submit_button("💾 Uložit tipy"):
-                draw_errors = []
-                # Kontrola remíz
-                for zid, (d, h, ot) in tips_to_save.items():
-                    # --- OPRAVA: Ignorujeme stav 0:0 (nenatipováno) ---
-                    if d == 0 and h == 0:
-                        continue
+                # --- KARTA ZÁPASU ---
+                with st.expander(card_label, expanded=not (is_locked or is_played)):
                     
-                    # Pokud není 0:0, ale skóre je stejné -> CHYBA
+                    # Hlavička uvnitř karty (Vlajky velké)
+                    st.markdown(
+                        f"<div style='text-align: center; font-size: 1.2rem; margin-bottom: 15px; color: #334155;'>"
+                        f"<b>{z['Domaci']}</b> {f_d} <span style='color:#cbd5e1; margin:0 15px'>|</span> {f_h} <b>{z['Hoste']}</b>"
+                        f"</div>", 
+                        unsafe_allow_html=True
+                    )
+
+                    if is_played or is_locked:
+                        # ZOBRAZENÍ VÝSLEDKU (READ-ONLY)
+                        p, ie, _, ot_p = spocitej_body_zapas(
+                            old_d, old_h, z['Skore_Domaci'], z['Skore_Hoste'], 
+                            z['Domaci'], z['Hoste'], z.get('Faze',''),
+                            old_ot, z.get('Prodlouzeni', '')
+                        )
+                        ot_txt = f" (OT: {ot_p}b)" if ot_p != 0 else ""
+                        
+                        # Barvičky
+                        bg = "#dcfce7" if p > 0 else "#fee2e2"
+                        border = "#22c55e" if p > 0 else "#ef4444"
+                        
+                        st.markdown(
+                            f"<div style='background-color: {bg}; padding: 10px; border-radius: 8px; text-align: center; border: 1px solid {border};'>"
+                            f"<strong style='color: #000; font-size: 1.2rem;'>Zisk: {p} b.</strong> {ot_txt}<br>"
+                            f"<small>Realita: {z['Skore_Domaci']}:{z['Skore_Hoste']} | Tvůj tip: {old_d}:{old_h}</small>"
+                            f"</div>", unsafe_allow_html=True
+                        )
+                            
+                    else:
+                        # FORMULÁŘ PRO TIPOVÁNÍ - FINAL FIX
+                        
+                        # Inputy
+                        _, c_d, c_vs, c_h, _ = st.columns([2, 2.5, 0.6, 2.5, 2])
+                        
+                        with c_d:
+                            st.markdown(f"<div style='text-align: center; font-size:0.85rem; font-weight:bold; margin-bottom:4px; color: #475569;'>DOMÁCÍ</div>", unsafe_allow_html=True)
+                            v_d = st.number_input("D", value=int(old_d) if old_d != "" else 0, key=f"d_{zid}", min_value=0, label_visibility="collapsed")
+                        
+                        with c_vs:
+                            # ČERNÁ DVOJTEČKA
+                            st.markdown(
+                                "<div style='display: flex; align-items: center; justify-content: center; height: 84px; font-weight: 900; font-size: 2rem; color: #000000; padding-top: 15px;'>:</div>", 
+                                unsafe_allow_html=True
+                            )
+                        
+                        with c_h:
+                            st.markdown(f"<div style='text-align: center; font-size:0.85rem; font-weight:bold; margin-bottom:4px; color: #475569;'>HOSTÉ</div>", unsafe_allow_html=True)
+                            v_h = st.number_input("H", value=int(old_h) if old_h != "" else 0, key=f"h_{zid}", min_value=0, label_visibility="collapsed")
+                        
+                        # PRODLOUŽENÍ (OT) - Centrování
+                        st.write("") 
+                        is_checked = (str(old_ot).upper() == "ANO")
+                        
+                        # TRIK PRO CENTROVÁNÍ:
+                        # Prostřední sloupec uděláme jen tak široký, aby se tam vešel text.
+                        # Tím, že krajní sloupce zaberou zbytek, se to "vystředí" tlakem.
+                        _, c_ot_center, _ = st.columns([1, 0.8, 1]) 
+                        
+                        with c_ot_center:
+                            v_ot = st.checkbox(
+                                "Bude prodloužení / nájezdy?", 
+                                value=is_checked, 
+                                key=f"ot_{zid}",
+                                help="Zaškrtni, pokud věříš, že se NEROZHODNE v základní hrací době."
+                            )
+                            
+                            # Validace hned pod tím
+                            if v_ot:
+                                if abs(v_d - v_h) == 1:
+                                    # UPDATE: Odstraněno pozadí (background-color) a rámeček. Jen čistý text.
+                                    st.markdown("<div style='text-align: center; color: #16a34a; font-weight:bold; font-size: 0.9rem; margin-top: 5px;'>✅ Tip na prodloužení aktivní</div>", unsafe_allow_html=True)
+                                else:
+                                    # Chybovou hlášku necháme podbarvenou, ta musí křičet
+                                    st.markdown("<div style='text-align: center; background-color: #fee2e2; color: #991b1b; padding: 4px; border-radius: 4px; font-weight: bold; font-size: 0.8rem; margin-top: 5px; border: 1px solid #fecaca;'>⚠️ Rozdíl musí být 1 gól!</div>", unsafe_allow_html=True)
+
+                        tips_to_save[zid] = (v_d, v_h, "ANO" if v_ot else "")
+
+            # --- TLAČÍTKO ULOŽIT ---
+            st.write("---")
+            zpravy_placeholder = st.empty()
+
+            # OPRAVA TLAČÍTKA: Odstraněn parametr type="primary" (už nebude červené/plné)
+            # Necháme use_container_width=True, aby bylo hezky přes šířku, ale bude mít neutrální barvu.
+            if st.form_submit_button("💾 Uložit tipy", use_container_width=True):
+                draw_errors = []
+                for zid, (d, h, ot) in tips_to_save.items():
+                    if d == 0 and h == 0: continue
                     if d == h:
                         match_name = match_names_map.get(str(zid), f"Zápas {zid}")
                         draw_errors.append(match_name)
                 
                 if draw_errors:
-                    error_msg = "❌ **CHYBA: Nelze uložit remízu!**\n\n**Oprav tyto zápasy:**\n"
-                    for err in draw_errors:
-                        error_msg += f"* {err}\n"
-                    error_msg += "\n*Uprav skóre a klikni znovu na Uložit.*"
-                    
-                    # Vypíše se DOLE nad tlačítkem
-                    zpravy_placeholder.error(error_msg)
+                    msg = "**❌ CHYBA: Remíza není povolena!**\n\nUprav tyto zápasy:\n" + "\n".join([f"- {e}" for e in draw_errors])
+                    zpravy_placeholder.error(msg)
                 else:
-                    with st.spinner("Ukládám..."): 
+                    with st.spinner("Ukládám tipy..."): 
                         save_tips_batch(ws_tipy, st.session_state['user_email'], tips_to_save, tipy)
                         zpravy_placeholder.success("✅ Tipy úspěšně uloženy!")
                         time.sleep(1)
