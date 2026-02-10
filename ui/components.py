@@ -149,7 +149,9 @@ def add_bg_from_local(image_file):
         border-left: 8px solid #007bff !important;
         border: 1px solid #007bff !important;
         box-shadow: 0 4px 6px rgba(0,0,0,0.3) !important;
-        color: #000 !important; padding: 20px !important;
+        color: #000 !important; 
+        padding: 20px !important;
+        text-align: center !important;
     }}
 
     /* --- NOVÉ ÚPRAVY PRO STATISTIKY --- */

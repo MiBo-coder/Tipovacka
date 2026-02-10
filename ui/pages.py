@@ -44,6 +44,38 @@ def get_user_points_at_date(users, tipy, zapasy, date_limit):
     
     return match_points
 
+def get_daily_message():
+    """Vrátí kontextovou hlášku podle aktuálního data."""
+    now = datetime.now(TIMEZONE)
+    day = now.day
+    month = now.month
+    
+    # Pokud není únor 2026, vrátíme obecnou hlášku (pro testování nebo jiný rok)
+    if month != 2 or now.year != 2026:
+        return "Vítejte u olympijské tipovačky!"
+
+    if day < 11:
+        return f"Do startu turnaje zbývá {11 - day} dní! Už aby to tu bylo!"
+    elif day == 11:
+        return "Dnes to vypukne! Začíná základní část."
+    elif 11 < day <= 15:
+        return "Základní skupiny jsou v plném proudu. Každý bod se počítá!"
+    elif day == 16:
+        return "Základní část skončila. Zítra začíná play-off!"
+    elif day == 17:
+        return "Osmifinále! Kdo dnes vypadne a pojede domů?"
+    elif day == 18:
+        return "Čtvrtfinále. Teď už jde do tuhého."
+    elif day == 19:
+        return "Den volna před bouří. Zkontroluj si své tipy na medaile!"
+    elif day == 20:
+        return "Semifinále! Kdo si zahraje o zlato?"
+    elif day == 21:
+        return "Boj o bronz. Utěcha nebo zklamání?"
+    elif day == 22:
+        return "VELKÉ FINÁLE! Kdo se stane olympijským šampionem?"
+    else:
+        return "Turnaj je za námi. Sláva vítězům, čest poraženým!"
 
 def render_main_application():
     """Hlavní aplikace pro přihlášeného uživatele"""
@@ -52,16 +84,144 @@ def render_main_application():
     zapasy, tipy, users, config, chat_data = load_all_data()
     ws_zapasy, ws_tipy, ws_users, ws_nastaveni, ws_chat = get_worksheets_resources()
     
-    # Horní lišta
-    curr_id = next((u.get('ID', '?') for u in users if str(u['Email']) == st.session_state['user_email']), '?')
-    c1, _, c3 = st.columns([3, 4, 1])
-    c1.write(f"👤 **{st.session_state['user_name']}** (ID: {curr_id})")
-    c1.caption(f"Tým: {st.session_state.get('user_team') or '-'}")
-    if c3.button("Odhlásit"):
-        st.session_state['logged_in'] = False
-        st.rerun()
-    st.divider()
+    # --- PŘÍPRAVA STATISTIK ZÁPASŮ (CACHE) ---
+    match_stats_cache = {}
+    tips_by_match_id = {}
+    for t in tipy:
+        zid = t['Zapas_ID']
+        tips_by_match_id.setdefault(zid, []).append(t)
     
+    for z in zapasy:
+        zid = z['ID']
+        mts = tips_by_match_id.get(zid, [])
+        valid_tips = [x for x in mts if not (int(x['Tip_Domaci']) == 0 and int(x['Tip_Hoste']) == 0)]
+        total = len(valid_tips)
+        
+        if total > 0:
+            d = sum(1 for x in valid_tips if int(x['Tip_Domaci']) > int(x['Tip_Hoste']))
+            h = sum(1 for x in valid_tips if int(x['Tip_Hoste']) > int(x['Tip_Domaci']))
+            perc_d = int(d / total * 100)
+            perc_h = 100 - perc_d
+            match_stats_cache[zid] = (perc_d, perc_h, total)
+        else:
+            match_stats_cache[zid] = (0, 0, 0)
+
+    # ==========================================
+    # 1. HLAVIČKA (PROFIL + ODHLÁSIT)
+    # ==========================================
+    curr_id = next((u.get('ID', '?') for u in users if str(u['Email']) == st.session_state['user_email']), '?')
+    
+    # Použijeme sloupce, aby to bylo v jedné rovině
+    c_head1, c_head2 = st.columns([5, 1])
+    with c_head1:
+        st.markdown(f"👤 **{st.session_state['user_name']}** <span style='color:grey; font-size:0.8em'>(ID: {curr_id})</span>", unsafe_allow_html=True)
+    with c_head2:
+        if st.button("Odhlásit", use_container_width=True):
+            st.session_state['logged_in'] = False
+            st.rerun()
+    
+    # ==========================================
+    # 2. INFO BOX (HLÁŠKA DNE / POŘADÍ)
+    # ==========================================
+    # Tady si připravíme data pro box, ale vykreslíme ho hezky čistě
+    
+    # Musíme si narychlo spočítat body pro zobrazení pořadí (zjednodušená verze pro UI)
+    # Kompletní výpočet běží níže, tady jen pro InfoBox vytáhneme data z "df_rank" pokud existuje, 
+    # ale protože df_rank se počítá až dole, použijeme Placeholder a naplníme ho až na konci funkce!
+    
+    info_box_placeholder = st.container()
+    
+    # ==========================================
+    # 3. NEJBLIŽŠÍ ZÁPAS
+    # ==========================================
+    prague_tz = pytz.timezone('Europe/Prague')
+    now_prague = datetime.now(prague_tz)
+    upcoming_match = None
+    
+    # Najdeme nejbližší budoucí zápas
+    # Seřadíme zápasy časově, abychom našli ten opravdu první budoucí
+    sorted_matches = sorted([z for z in zapasy if str(z['Skore_Domaci']) == ""], key=lambda x: x.get('Datum_Obj') or datetime.max)
+    
+    for z in sorted_matches:
+        match_dt = z.get('Datum_Obj')
+        if match_dt:
+            if match_dt.tzinfo is None: match_dt = prague_tz.localize(match_dt)
+            if match_dt > now_prague:
+                upcoming_match = z
+                match_dt_aware = match_dt
+                break
+    
+    if upcoming_match:
+        delta = match_dt_aware - now_prague
+        hours, remainder = divmod(delta.seconds, 3600); minutes, _ = divmod(remainder, 60)
+        
+        # Statistiky pro tento zápas
+        pd_next, ph_next, _ = match_stats_cache.get(upcoming_match['ID'], (0,0,0))
+        f_d = get_flag(upcoming_match['Domaci']); f_h = get_flag(upcoming_match['Hoste'])
+
+        # Vykreslení Boxu
+        st.markdown(f"""
+        <div class="next-match-box" style="margin-top: 20px; margin-bottom: 20px;">
+            <div style="font-size: 0.9em; text-transform: uppercase; letter-spacing: 1px; color: #64748b; margin-bottom: 5px;">⏱️ Nejbližší zápas (za {delta.days}d {hours}h {minutes}m)</div>
+            <div style="font-size: 1.4em; font-weight: bold;">
+                {f_d} {upcoming_match['Domaci']} <span style="color:#000000">:</span> {upcoming_match['Hoste']} {f_h}
+            </div>
+            <div style="font-size: 0.8em; color: #475569; margin-top: 5px;">
+                Jsk tipujeme na tento zápas: Domácí <b>{pd_next}%</b> : <b>{ph_next}%</b> Hosté
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # ==========================================
+    # 4. RYCHLÝ PŘEHLED (NOVINKY & CHAT) - Místo Sidebaru
+    # ==========================================
+    # Zobrazíme jen pokud už turnaj běží (jsou výsledky) nebo se kecá
+    finished_matches = [z for z in zapasy if str(z['Skore_Domaci']) != ""]
+    
+    if finished_matches or chat_data:
+        c_news1, c_news2 = st.columns(2)
+        
+        # A) Poslední 2 výsledky
+        with c_news1:
+            st.markdown("<div style='font-size: 0.8em; color: #64748b; font-weight: bold; margin-bottom: 5px;'>POSLEDNÍ VÝSLEDKY</div>", unsafe_allow_html=True)
+            if finished_matches:
+                # Vezmeme poslední 2 a otočíme je (nejnovější nahoře)
+                last_matches = finished_matches[-2:]
+                for m in reversed(last_matches):
+                    f_d = get_flag(m['Domaci']); f_h = get_flag(m['Hoste'])
+                    # Vykreslení karty
+                    st.markdown(f"""
+                    <div style="border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px; background-color: white; margin-bottom: 8px;">
+                        <div style="font-weight: bold; font-size: 0.9em;">
+                            {f_d} {m['Domaci']} <span style="color:#ef4444">{m['Skore_Domaci']}:{m['Skore_Hoste']}</span> {m['Hoste']} {f_h}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.caption("Čekání na první zápas")
+
+        # B) Poslední 2 zprávy z chatu
+        with c_news2:
+            st.markdown("<div style='font-size: 0.8em; color: #64748b; font-weight: bold; margin-bottom: 5px;'>💬 DISKUZE</div>", unsafe_allow_html=True)
+            if chat_data:
+                # Vezmeme poslední 2 a otočíme je
+                last_msgs = chat_data[-2:]
+                for msg in reversed(last_msgs):
+                    # Zkrácení zprávy, kdyby byla moc dlouhá (max 40 znaků)
+                    msg_txt = (msg['Zprava'][:40] + '..') if len(msg['Zprava']) > 40 else msg['Zprava']
+                    st.markdown(f"""
+                    <div style="border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px; background-color: white; margin-bottom: 8px;">
+                        <div style="font-size: 0.85em;">
+                            <b>{msg['Hrac']}:</b> {msg_txt}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.caption("V diskuzi je ticho.")
+
+    st.write("") # Malá mezera před medailemi
+
+    # UPOZORNĚNÍ NA MEDAILE (Pokud chybí)
     me_stats = next((u for u in users if str(u['Email']) == st.session_state['user_email']), {})
     has_medals = (
         str(me_stats.get('Tip_Vitez','')).strip() and 
@@ -71,48 +231,9 @@ def render_main_application():
     )
     
     if not has_medals and not is_past_deadline(DEADLINE):
-        st.warning("⚠️ **POZOR:** Nemáš natipované medaile a vítěze! Bez toho přicházíš o možnost získat bonusové body. Jdi do záložky **Medaile** a ulož tipy.")
+        st.warning("⚠️ **POZOR:** Nemáš natipované medaile a vítěze! Jdi do záložky **Medaile**.")
 
-    prague_tz = pytz.timezone('Europe/Prague')
-    now_prague = datetime.now(prague_tz)
-    match_dt_aware = None
-    upcoming_match = None
-
-    for z in zapasy:
-        if str(z['Skore_Domaci']) == "":
-            match_dt = z.get('Datum_Obj') # Toto už je nyní díky nové parse_date "aware" (má zónu)
-            if match_dt:
-                # Pro jistotu, kdyby náhodou zónu neměl (stará cache), ošetříme to:
-                if match_dt.tzinfo is None:
-                    match_dt = prague_tz.localize(match_dt)
-
-                if match_dt > now_prague:
-                    upcoming_match = z
-                    match_dt_aware = match_dt
-                    break
-
-    if upcoming_match and match_dt_aware:
-        delta = match_dt_aware - now_prague
-        hours, remainder = divmod(delta.seconds, 3600); minutes, _ = divmod(remainder, 60)
-
-        tips_d, tips_h = 0, 0
-        for t in tipy:
-            if t['Zapas_ID'] == upcoming_match['ID']:
-                if t['Tip_Domaci'] > t['Tip_Hoste']: tips_d += 1
-                elif t['Tip_Hoste'] > t['Tip_Domaci']: tips_h += 1
-        total_tips = tips_d + tips_h
-        perc_d = int(tips_d/total_tips*100) if total_tips else 0
-        perc_h = int(tips_h/total_tips*100) if total_tips else 0
-
-        f_d = get_flag(upcoming_match['Domaci']); f_h = get_flag(upcoming_match['Hoste'])
-
-        st.markdown(f"""
-        <div class="next-match-box">
-            <b>⏱️ Nejbližší zápas:</b> {f_d} {upcoming_match['Domaci']} vs {f_h} {upcoming_match['Hoste']} (za {delta.days}d {hours}h {minutes}m)<br>
-            <small>Jak tipují hráči: {perc_d}% domácí / {perc_h}% hosté</small>
-        </div>
-        """, unsafe_allow_html=True)
-
+    # Tady kód pokračuje VÝPOČTY BODŮ...
     # VÝPOČTY BODŮ
     match_points = {}; exact_matches = {}; matches_scored = {}; stats_basic = {}; stats_playoff = {}
     # Nové bonusové kontejnery
@@ -248,6 +369,79 @@ def render_main_application():
     df_rank = pd.DataFrame(rd).sort_values("Celkem", ascending=False).reset_index(drop=True)
     df_rank['Pořadí'] = df_rank['Celkem'].rank(method='min', ascending=False).astype(int)
 
+    # --- NAPLNĚNÍ INFO BOXU (Placeholder nahoře) ---
+    with info_box_placeholder:
+        daily_msg = get_daily_message()
+        my_row = df_rank[df_rank['Email'] == st.session_state['user_email']]
+        
+        if not my_row.empty:
+            my_points = my_row.iloc[0]['Celkem']
+            my_rank = my_row.iloc[0]['Pořadí']
+            leader_points = df_rank.iloc[0]['Celkem']
+            
+            # 1. DEFINICE PROMĚNNÝCH (Aby nepadal NameError)
+            ahead_txt = ""
+            behind_txt = ""
+            equals_txt = "" 
+            content_html = ""
+            
+            if leader_points == 0:
+                # --- STAV PŘED TURNAJEM (Všichni 0) ---
+                content_html = f"""
+                <div style="text-align: center; color: #475569; margin-bottom: 15px;">
+                    <div style="font-weight: bold; font-size: 1.1em; margin-bottom: 5px; color: #1e293b;">{daily_msg}</div>
+                    <div style="font-size: 0.9em;">Zatím všichni startujeme na stejné čáře. <b>0 bodů</b>.</div>
+                </div>
+                """
+            else:
+                # --- STAV BĚHEM TURNAJE ---
+                my_idx = df_rank.index[df_rank['Email'] == st.session_state['user_email']].tolist()[0]
+                
+                # Kdo je přede mnou?
+                if my_idx > 0:
+                    prev_row = df_rank.iloc[my_idx - 1]
+                    if prev_row['Celkem'] > my_points:
+                        ahead_txt = f"Před tebou: <b>{prev_row['Hráč']}</b> ({prev_row['Celkem']} b)"
+                    else:
+                        # Má stejně bodů jako ten před ním
+                        equals_txt = " (Dělíš se o pozici)"
+                else:
+                    ahead_txt = "Jsi ve vedení!"
+                    
+                # Kdo je za mnou?
+                if my_idx < len(df_rank) - 1:
+                    next_row = df_rank.iloc[my_idx + 1]
+                    if next_row['Celkem'] < my_points:
+                        behind_txt = f"Za tebou: <b>{next_row['Hráč']}</b> ({next_row['Celkem']} b)"
+                    else:
+                        # Pokud má ten za mnou stejně bodů, řeší to už equals_txt nahoře nebo je to v rámci skupiny
+                        pass
+
+                # HTML KONSTRUKCE
+                # Oddělovač | zobrazíme jen když máme text na obou stranách
+                separator = '<span style="margin: 0 10px; color: #cbd5e1;">|</span>' if (ahead_txt and behind_txt) else ""
+
+                content_html = f"""
+                <div style="text-align: center; color: #1e293b; padding: 10px;">
+                    <div style="font-weight: bold; font-size: 1.1em; margin-bottom: 5px;">{daily_msg}</div>
+                    <div style="font-size: 1em; margin-bottom: 8px;">Aktuálně jsi na <b>{int(my_rank)}. místě</b> ({my_points} b){equals_txt}.</div>
+                    <div style="font-size: 0.85em; color: #64748b;">
+                        {ahead_txt} {separator} {behind_txt}
+                    </div>
+                </div>
+                """
+            
+            st.markdown(content_html, unsafe_allow_html=True)
+            
+            # Tiper dne
+            tiper_txt = ""
+            if tiper_dne_log:
+                last_td = tiper_dne_log[-1] # Poslední záznam
+                tiper_txt = f"🏅 Tiperem dne ({last_td['Datum'].strftime('%d.%m.')}) se stal **{last_td['Jméno']}** ({last_td['Body ten den']} b)."
+
+        else:
+            st.warning("Zatím nejsi v žebříčku (nemáš body).")
+
     # Trendy
     prague_tz = pytz.timezone('Europe/Prague')  # 1. Musíme znát zónu
     yesterday_limit = datetime.now(prague_tz) - timedelta(days=1) # 2. Teď je 'yesterday_limit' aware (má zónu)
@@ -363,8 +557,30 @@ def render_main_application():
                 # Vytvoříme hezký label s vlajkami
                 card_label = f"{clock} {z['Domaci']} vs {z['Hoste']} ({d_str})"
 
+                # Načtení statistik z cache
+                perc_d, perc_h, count_tips = match_stats_cache.get(zid, (0, 0, 0))
+                
+                # UPDATE TEXTU: "tento zápas již natipovalo..."
+                stats_label = f" | {count_tips} hráčů již natipovalo" if count_tips > 0 else ""
+                card_label = f"{clock} {z['Domaci']} vs {z['Hoste']} ({d_str}){stats_label}"
+
                 # --- KARTA ZÁPASU ---
                 with st.expander(card_label, expanded=not (is_locked or is_played)):
+                    
+                    # === NOVÉ: GRAFICKÝ PRUH (MODRÁ vs ČERVENÁ) ===
+                    if count_tips > 0:
+                        # Modrá (Domácí) zleva, Červená (Hosté) zprava
+                        # Uděláme to jako flexbox dvou divů
+                        st.markdown(f"""
+                        <div style="display: flex; justify-content: space-between; font-size: 0.8em; color: #334155; margin-bottom: 5px;">
+                            <span> {z['Domaci']}: <b>{perc_d}%</b></span>
+                            <span> {z['Hoste']}: <b>{perc_h}%</b></span>
+                        </div>
+                        
+                        <div style="width: 100%; height: 8px; background-color: #ef4444; border-radius: 4px; overflow: hidden; margin-bottom: 15px; display: flex;">
+                            <div style="width: {perc_d}%; height: 100%; background-color: #3b82f6;"></div>
+                            </div>
+                        """, unsafe_allow_html=True)
                     
                     # Hlavička uvnitř karty (Vlajky velké)
                     st.markdown(
@@ -1063,13 +1279,13 @@ def render_main_application():
         # Kolik jich teď chceme zobrazit?
         current_limit = st.session_state['chat_limit']
 
-        st.caption(f"Místo pro hecování, analýzy a trash-talk. Zobrazuji posledních **{min(current_limit, total_msgs)}** zpráv.")
+        st.caption(f"Místo pro hecování, analýzy, drby a všechno ostatní s čím se chcete podělit s ostatními. Zobrazuji posledních **{min(current_limit, total_msgs)}** zpráv.")
 
         # A) VSTUPNÍ POLE
         with st.form("chat_input_form", clear_on_submit=True):
             col_ch1, col_ch2 = st.columns([5, 1], vertical_alignment="bottom")
             new_msg = col_ch1.text_input("Napiš zprávu...", key="chat_msg_input", placeholder="Kdo neskáče není Čech...")
-            sent = col_ch2.form_submit_button("Odeslat ✈️")
+            sent = col_ch2.form_submit_button("Odeslat")
 
             if sent and new_msg:
                 prague_tz = pytz.timezone('Europe/Prague')
