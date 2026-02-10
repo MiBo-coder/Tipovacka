@@ -23,6 +23,9 @@ def render_login_page():
     # Načtení dat
     _, _, users, _, _ = load_all_data()
     ws_zapasy, ws_tipy, ws_users, ws_nastaveni, ws_chat = get_worksheets_resources()
+
+    pocet_hracu = len(users)
+    st.markdown(f"<div style='text-align: center; color: #64748b; margin-bottom: 20px;'>Do hry je zapojeno již <b>{pocet_hracu}</b> hráčů!</div>", unsafe_allow_html=True)
     
     # 1. HLAVNÍ SLOUPEC PRO CENTROVÁNÍ (Responsivní)
     # Na mobilu to zabere víc místa, na desktopu jen střed.
