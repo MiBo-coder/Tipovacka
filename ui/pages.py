@@ -696,7 +696,7 @@ def render_main_application():
         sorted_users = sorted(users, key=lambda u: 0 if str(u['Email']) == my_email else 1)
 
         # 2. PŘÍPRAVA DAT (VŠECHNY ZÁPASY)
-        # Seřadíme zápasy podle ID (předpokládáme chronologické ID), aby šly popořadě
+        # Seřadíme zápasy podle ID
         all_matches_sorted = sorted(zapasy, key=lambda x: int(x['ID']))
         
         data = []
@@ -707,7 +707,7 @@ def render_main_application():
             is_finished = (str(z['Skore_Domaci']) != "")
             faze = z.get('Faze', '')
             
-            # Formátování výsledku
+            # Formátování výsledku zápasu
             vis_result = f"{z['Skore_Domaci']}:{z['Skore_Hoste']}" if is_finished else "-"
             if is_finished and str(z.get('Prodlouzeni','')) == 'ANO': 
                 vis_result += " (OT)"
@@ -727,25 +727,42 @@ def render_main_application():
                 if is_finished:
                     # --- SCÉNÁŘ A: ZÁPAS SKONČIL (Ukazujeme body a konkrétní tip) ---
                     if t:
-                        p, ie, _, _ = spocitej_body_zapas(
-                            t['Tip_Domaci'], t['Tip_Hoste'], 
-                            z['Skore_Domaci'], z['Skore_Hoste'], 
-                            z['Domaci'], z['Hoste'], z.get('Faze',''),
-                            t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
-                        )
-                        # Formát buňky: "2:1 (OT) (3b)"
-                        txt = f"{t['Tip_Domaci']}:{t['Tip_Hoste']}"
-                        if str(t.get('Tip_Prodlouzeni','')) == 'ANO': txt += " (OT)"
-                        txt += f" ({p} b.)"
-                        if ie: txt = f"⭐ {txt}"
+                        # Zde musíme ošetřit 0:0 i pro výpočet (i když by to scoring funkce měla zvládnout)
+                        d = int(t.get('Tip_Domaci', 0))
+                        h = int(t.get('Tip_Hoste', 0))
+                        
+                        if d == 0 and h == 0:
+                            txt = "-" # Tip 0:0 se nepočítá
+                        else:
+                            p, ie, _, _ = spocitej_body_zapas(
+                                t['Tip_Domaci'], t['Tip_Hoste'], 
+                                z['Skore_Domaci'], z['Skore_Hoste'], 
+                                z['Domaci'], z['Hoste'], z.get('Faze',''),
+                                t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
+                            )
+                            # Formát buňky: "2:1 (OT) (3b)"
+                            txt = f"{t['Tip_Domaci']}:{t['Tip_Hoste']}"
+                            if str(t.get('Tip_Prodlouzeni','')) == 'ANO': txt += " (OT)"
+                            txt += f" ({p} b.)"
+                            if ie: txt = f"⭐ {txt}"
                     else: 
                         txt = "-"
                 else:
-                    # --- SCÉNÁŘ B: ZÁPAS SE DOPIERO BUDE HRÁT (Maskujeme tipy) ---
+                    # --- SCÉNÁŘ B: ZÁPAS SE BUDE HRÁT (Maskujeme tipy) ---
                     if t:
-                        txt = "NATIPOVÁNO" # ✅ Uživatel má splněno
+                        # VALIDACE: Je tip platný? (Není to 0:0?)
+                        try:
+                            d = int(t.get('Tip_Domaci', 0))
+                            h = int(t.get('Tip_Hoste', 0))
+                        except:
+                            d, h = 0, 0
+
+                        if d == 0 and h == 0:
+                            txt = "" # 0:0 považujeme za nenatipováno
+                        else:
+                            txt = "✅ NATIPOVÁNO" 
                     else:
-                        txt = "" # ❌ Uživatel zatím netipoval (prázdná buňka)
+                        txt = "" # Žádný záznam v DB
 
                 # Uložení do řádku
                 row[email] = txt
@@ -779,7 +796,6 @@ def render_main_application():
             df_ov.columns = pd.MultiIndex.from_tuples(header_tuples)
 
             # Vykreslení
-            # height=600 zajistí, že tabulka bude mít fixní výšku a bude se scrollovat uvnitř
             st.dataframe(
                 df_ov.style.set_properties(**{'text-align': 'center', 'white-space': 'nowrap'}), 
                 use_container_width=True, 
