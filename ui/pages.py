@@ -686,39 +686,46 @@ def render_main_application():
     # 2. PŘEHLED
     with t_overview:
         st.header("Globální přehled tipů")
+        st.caption("Velká tabule se všemi zápasy a tipy. U budoucích zápasů vidíš, kdo už má splněno.")
 
         # Příprava dat
         rank_map = df_rank.set_index('Email')['Pořadí'].to_dict()
         my_email = st.session_state.get('user_email', '')
 
         # 1. SEŘAZENÍ HRÁČŮ (JÁ PRVNÍ, PAK OSTATNÍ)
-        # Vytvoříme seznam uživatelů, kde vy jste na indexu 0
         sorted_users = sorted(users, key=lambda u: 0 if str(u['Email']) == my_email else 1)
 
-        # A) TABULKA ZÁPASŮ
-        if not finished_matches: 
-            st.info("Zatím žádné odehrané zápasy.")
-        else:
-            data = []
-            tips_map = {(str(t['Email']), t['Zapas_ID']): t for t in tipy}
+        # 2. PŘÍPRAVA DAT (VŠECHNY ZÁPASY)
+        # Seřadíme zápasy podle ID (předpokládáme chronologické ID), aby šly popořadě
+        all_matches_sorted = sorted(zapasy, key=lambda x: int(x['ID']))
+        
+        data = []
+        tips_map = {(str(t['Email']), t['Zapas_ID']): t for t in tipy}
 
-            # --- I. PŘÍPRAVA DAT (ŘÁDKY) ---
-            for z in finished_matches:
-                faze = z.get('Faze', '')
-                # Základní data řádku (klíče musí odpovídat sloupcům níže)
-                row = {
-                    "Zápas": f"{z['Domaci']} - {z['Hoste']}", 
-                    "Fáze": faze, 
-                    "Výsledek": f"{z['Skore_Domaci']}:{z['Skore_Hoste']}"
-                }
-                if str(z.get('Prodlouzeni','')) == 'ANO': 
-                    row["Výsledek"] += " (OT)"
+        for z in all_matches_sorted:
+            # Zjistíme, jestli je zápas odehraný
+            is_finished = (str(z['Skore_Domaci']) != "")
+            faze = z.get('Faze', '')
+            
+            # Formátování výsledku
+            vis_result = f"{z['Skore_Domaci']}:{z['Skore_Hoste']}" if is_finished else "-"
+            if is_finished and str(z.get('Prodlouzeni','')) == 'ANO': 
+                vis_result += " (OT)"
 
-                # Přidání bodů jednotlivých hráčů
-                for u in sorted_users:
-                    email = str(u['Email'])
-                    t = tips_map.get((email, z['ID']))
+            # Základní data řádku
+            row = {
+                "Zápas": f"{z['Domaci']} - {z['Hoste']}", 
+                "Fáze": faze, 
+                "Výsledek": vis_result
+            }
 
+            # Průchod přes všechny hráče (sloupce)
+            for u in sorted_users:
+                email = str(u['Email'])
+                t = tips_map.get((email, z['ID']))
+
+                if is_finished:
+                    # --- SCÉNÁŘ A: ZÁPAS SKONČIL (Ukazujeme body a konkrétní tip) ---
                     if t:
                         p, ie, _, _ = spocitej_body_zapas(
                             t['Tip_Domaci'], t['Tip_Hoste'], 
@@ -733,49 +740,53 @@ def render_main_application():
                         if ie: txt = f"⭐ {txt}"
                     else: 
                         txt = "-"
+                else:
+                    # --- SCÉNÁŘ B: ZÁPAS SE DOPIERO BUDE HRÁT (Maskujeme tipy) ---
+                    if t:
+                        txt = "NATIPOVÁNO" # ✅ Uživatel má splněno
+                    else:
+                        txt = "" # ❌ Uživatel zatím netipoval (prázdná buňka)
 
-                    # Klíčem v datech je email (unikátní), později ho přemapujeme na MultiIndex
-                    row[email] = txt
-                data.append(row)
+                # Uložení do řádku
+                row[email] = txt
+            
+            data.append(row)
 
-            # --- II. VYTVOŘENÍ DATAFRAME A MULTIINDEX HLAVIČKY ---
-            # Definujeme pořadí sloupců v DF: Info sloupce + Seřazení uživatelé
+        # --- II. VYTVOŘENÍ DATAFRAME A MULTIINDEX HLAVIČKY ---
+        if data:
             cols_order = ['Zápas', 'Fáze', 'Výsledek'] + [str(u['Email']) for u in sorted_users]
             df_ov = pd.DataFrame(data, columns=cols_order)
 
             # Vytvoření dvouřádkové hlavičky (MultiIndex)
-            # 1. úroveň = Jméno (nebo název sloupce)
-            # 2. úroveň = Statistiky (nebo prázdné)
             header_tuples = []
 
-            # Pro info sloupce necháme druhý řádek prázdný
+            # Pro info sloupce
             top_header = "📝 INFO O ZÁPASE"
             header_tuples.append((top_header, 'Soupeři'))
             header_tuples.append((top_header, 'Fáze'))
             header_tuples.append((top_header, 'Výsledek'))
 
-            # Pro uživatele vytvoříme patrovou hlavičku
+            # Pro uživatele
             for u in sorted_users:
                 email = str(u['Email'])
                 u_rank = rank_map.get(email, '-')
                 u_points = total_points.get(email, 0)
 
-                # Horní řádek: Jméno
                 top_label = u['Jmeno']
-                # Spodní řádek: Pořadí a body
                 bottom_label = f"{u_rank}. místo ({u_points} b.)"
-
                 header_tuples.append((top_label, bottom_label))
 
-            # Aplikace MultiIndexu na sloupce
             df_ov.columns = pd.MultiIndex.from_tuples(header_tuples)
 
             # Vykreslení
+            # height=600 zajistí, že tabulka bude mít fixní výšku a bude se scrollovat uvnitř
             st.dataframe(
-                df_ov.style.set_properties(**{'text-align': 'center'}), 
+                df_ov.style.set_properties(**{'text-align': 'center', 'white-space': 'nowrap'}), 
                 use_container_width=True, 
-                hide_index=True
+                height=600  
             )
+        else:
+            st.info("Zatím nejsou k dispozici žádná data o zápasech.")
 
         # B) TABULKA DLOUHODOBÝCH SÁZEK
         if OFFICIAL_RESULTS.get('winner'):
