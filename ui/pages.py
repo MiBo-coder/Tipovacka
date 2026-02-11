@@ -688,46 +688,49 @@ def render_main_application():
     # 2. PŘEHLED
     with t_overview:
         st.header("Globální přehled tipů")
-        st.caption("Velká tabule se všemi zápasy a tipy. Tady si můžeš zkontrolovat, jak si vedeš a jestli už máš natipováno.")
+        st.caption("Velká tabule se všemi zápasy a tipy. U budoucích zápasů vidíš, kdo už má splněno.")
 
         # Příprava dat
         rank_map = df_rank.set_index('Email')['Pořadí'].to_dict()
         my_email = st.session_state.get('user_email', '')
+        my_name = st.session_state.get('user_name', '') # Potřebujeme pro styling
 
         # 1. SEŘAZENÍ HRÁČŮ (JÁ PRVNÍ, PAK OSTATNÍ)
         sorted_users = sorted(users, key=lambda u: 0 if str(u['Email']) == my_email else 1)
 
-        # 2. PŘÍPRAVA DAT (VŠECHNY ZÁPASY)
-        # Seřadíme zápasy podle ID
+        # 2. PŘÍPRAVA DAT
         all_matches_sorted = sorted(zapasy, key=lambda x: int(x['ID']))
         
         data = []
         tips_map = {(str(t['Email']), t['Zapas_ID']): t for t in tipy}
 
+        # Počítadlo řádků pro sloupec "#"
+        row_idx = 1
+
         for z in all_matches_sorted:
-            # Zjistíme, jestli je zápas odehraný
             is_finished = (str(z['Skore_Domaci']) != "")
             faze = z.get('Faze', '')
             
-            # Formátování výsledku
             vis_result = f"{z['Skore_Domaci']}:{z['Skore_Hoste']}" if is_finished else "-"
             if is_finished and str(z.get('Prodlouzeni','')) == 'ANO': 
                 vis_result += " (OT)"
 
-            # Základní data řádku
+            # Definice řádku - klíče pro indexové sloupce
             row = {
+                "#": row_idx,
                 "Zápas": f"{z['Domaci']} - {z['Hoste']}", 
                 "Fáze": faze, 
                 "Výsledek": vis_result
             }
+            row_idx += 1
 
-            # Průchod přes všechny hráče (sloupce)
+            # Průchod přes hráče
             for u in sorted_users:
                 email = str(u['Email'])
                 t = tips_map.get((email, z['ID']))
 
                 if is_finished:
-                    # --- SCÉNÁŘ A: ZÁPAS SKONČIL ---
+                    # SCÉNÁŘ A: ZÁPAS SKONČIL
                     if t:
                         d = int(t.get('Tip_Domaci', 0))
                         h = int(t.get('Tip_Hoste', 0))
@@ -741,7 +744,6 @@ def render_main_application():
                                 z['Domaci'], z['Hoste'], z.get('Faze',''),
                                 t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
                             )
-                            # Formát: "2:1 (OT) (3b)"
                             txt = f"{t['Tip_Domaci']}:{t['Tip_Hoste']}"
                             if str(t.get('Tip_Prodlouzeni','')) == 'ANO': txt += " (OT)"
                             txt += f" ({p} b.)"
@@ -749,60 +751,63 @@ def render_main_application():
                     else: 
                         txt = "-"
                 else:
-                    # --- SCÉNÁŘ B: ZÁPAS SE BUDE HRÁT ---
+                    # SCÉNÁŘ B: ZÁPAS SE BUDE HRÁT
                     if t:
-                        # Validace 0:0
                         try:
-                            d = int(t.get('Tip_Domaci', 0))
-                            h = int(t.get('Tip_Hoste', 0))
-                        except:
-                            d, h = 0, 0
-
-                        if d == 0 and h == 0:
-                            txt = "" 
-                        else:
-                            txt = "NATIPOVÁNO" 
+                            d, h = int(t.get('Tip_Domaci', 0)), int(t.get('Tip_Hoste', 0))
+                        except: d, h = 0, 0
+                        txt = "✅ NATIPOVÁNO" if (d != 0 or h != 0) else ""
                     else:
                         txt = "" 
 
+                # Klíčem je jméno hráče (aby odpovídalo hlavičce pro styling)
+                # POZOR: Tady si musíme dát pozor na unikátnost. 
+                # Pro jednoduchost použijeme Email jako klíč v datech, ale hlavičku přepíšeme.
                 row[email] = txt
             
             data.append(row)
 
-        # --- II. VYTVOŘENÍ DATAFRAME A MULTIINDEX HLAVIČKY ---
         if data:
-            cols_order = ['Zápas', 'Fáze', 'Výsledek'] + [str(u['Email']) for u in sorted_users]
-            df_ov = pd.DataFrame(data, columns=cols_order)
+            # Sloupce: Indexové + Hráči
+            cols_info = ['#', 'Zápas', 'Fáze', 'Výsledek']
+            cols_users = [str(u['Email']) for u in sorted_users]
+            
+            df_ov = pd.DataFrame(data, columns=cols_info + cols_users)
 
-            # --- FIX 1: Index startuje od 1 ---
-            df_ov.index = df_ov.index + 1
+            # --- A. NASTAVENÍ INDEXU (Tím se sloupce "přilepí" vlevo) ---
+            df_ov.set_index(['#', 'Zápas', 'Fáze', 'Výsledek'], inplace=True)
 
-            # Vytvoření dvouřádkové hlavičky
+            # --- B. VYTVOŘENÍ PATROVÉ HLAVIČKY PRO HRÁČE ---
             header_tuples = []
-            top_header = "📝 INFO O ZÁPASE"
-            header_tuples.append((top_header, 'Soupeři'))
-            header_tuples.append((top_header, 'Fáze'))
-            header_tuples.append((top_header, 'Výsledek'))
-
             for u in sorted_users:
                 email = str(u['Email'])
                 u_rank = rank_map.get(email, '-')
                 u_points = total_points.get(email, 0)
-                top_label = u['Jmeno']
-                bottom_label = f"{u_rank}. místo ({u_points} b.)"
-                header_tuples.append((top_label, bottom_label))
+                
+                # Hlavička: (Jméno, Info o bodech)
+                header_tuples.append((u['Jmeno'], f"{u_rank}. místo ({u_points} b.)"))
 
             df_ov.columns = pd.MultiIndex.from_tuples(header_tuples)
 
-            # --- FIX 2: Vynucení jednoho řádku (nowrap) ---
-            # Díky 'nowrap' se buňka roztáhne tak, aby se tam text vešel.
+            # --- C. STYLING (Podbarvení mého sloupce) ---
+            def highlight_me_col(s):
+                # s.name je tuple ('Jmeno', 'Info')
+                # Porovnáváme první část (Jméno) s mým jménem
+                col_name = s.name[0]
+                if col_name == my_name:
+                    return ['background-color: #e8f4f8; border-left: 2px solid #007bff; border-right: 2px solid #007bff; color: black; font-weight: bold'] * len(s)
+                return [''] * len(s)
+
+            # Aplikace stylu
+            styled_df = df_ov.style.apply(highlight_me_col, axis=0).set_properties(**{
+                'text-align': 'center', 
+                'white-space': 'nowrap'
+            })
+
             st.dataframe(
-                df_ov.style.set_properties(**{
-                    'text-align': 'center', 
-                    'white-space': 'nowrap' 
-                }), 
+                styled_df, 
                 use_container_width=True, 
-                height=600  
+                height=600
             )
         else:
             st.info("Zatím nejsou k dispozici žádná data o zápasech.")
