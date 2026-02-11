@@ -756,7 +756,7 @@ def render_main_application():
                         try:
                             d, h = int(t.get('Tip_Domaci', 0)), int(t.get('Tip_Hoste', 0))
                         except: d, h = 0, 0
-                        txt = "✅ NATIPOVÁNO" if (d != 0 or h != 0) else ""
+                        txt = "NATIPOVÁNO" if (d != 0 or h != 0) else ""
                     else:
                         txt = "" 
 
