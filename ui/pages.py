@@ -478,7 +478,7 @@ def render_main_application():
 
     # ZÁLOŽKY
     tab_names = [
-        "🏒 Tipování", "🕵️ Přehled", "🏆 Medaile", "🥇 Žebříček", 
+        "🕵️ Přehled", "🏒 Tipování", "🏆 Medaile", "🥇 Žebříček", 
         "🎯 Statistiky", "⚙️ Profil", "📜 Pravidla",
         "🏛️ Historické výsledky", "💰 Startovné a výhry", label_chat
     ]
@@ -494,7 +494,9 @@ def render_main_application():
     all_tabs = st.tabs(tab_names)
 
     # 4. Rozbalení standardních záložek (prvních 10)
-    t_matches, t_overview, t_long, t_rank, t_stats, t_prof, t_rules, t_history, t_bank, t_chat = all_tabs[:10]
+    # POZOR: Tady musíme prohodit i proměnné t_overview a t_matches, 
+    # aby odpovídaly pořadí v seznamu tab_names!
+    t_overview, t_matches, t_long, t_rank, t_stats, t_prof, t_rules, t_history, t_bank, t_chat = all_tabs[:10]
 
     # 5. Admin záložka (pokud existuje, je poslední)
     t_admin = all_tabs[10] if is_admin else None
@@ -686,7 +688,7 @@ def render_main_application():
     # 2. PŘEHLED
     with t_overview:
         st.header("Globální přehled tipů")
-        st.caption("Velká tabule se všemi zápasy a tipy. U budoucích zápasů vidíš, kdo už má splněno.")
+        st.caption("Velká tabule se všemi zápasy a tipy. Tady si můžeš zkontrolovat, jak si vedeš a jestli už máš natipováno.")
 
         # Příprava dat
         rank_map = df_rank.set_index('Email')['Pořadí'].to_dict()
