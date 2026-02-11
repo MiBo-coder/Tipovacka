@@ -707,7 +707,7 @@ def render_main_application():
             is_finished = (str(z['Skore_Domaci']) != "")
             faze = z.get('Faze', '')
             
-            # Formátování výsledku zápasu
+            # Formátování výsledku
             vis_result = f"{z['Skore_Domaci']}:{z['Skore_Hoste']}" if is_finished else "-"
             if is_finished and str(z.get('Prodlouzeni','')) == 'ANO': 
                 vis_result += " (OT)"
@@ -725,14 +725,13 @@ def render_main_application():
                 t = tips_map.get((email, z['ID']))
 
                 if is_finished:
-                    # --- SCÉNÁŘ A: ZÁPAS SKONČIL (Ukazujeme body a konkrétní tip) ---
+                    # --- SCÉNÁŘ A: ZÁPAS SKONČIL ---
                     if t:
-                        # Zde musíme ošetřit 0:0 i pro výpočet (i když by to scoring funkce měla zvládnout)
                         d = int(t.get('Tip_Domaci', 0))
                         h = int(t.get('Tip_Hoste', 0))
                         
                         if d == 0 and h == 0:
-                            txt = "-" # Tip 0:0 se nepočítá
+                            txt = "-"
                         else:
                             p, ie, _, _ = spocitej_body_zapas(
                                 t['Tip_Domaci'], t['Tip_Hoste'], 
@@ -740,7 +739,7 @@ def render_main_application():
                                 z['Domaci'], z['Hoste'], z.get('Faze',''),
                                 t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
                             )
-                            # Formát buňky: "2:1 (OT) (3b)"
+                            # Formát: "2:1 (OT) (3b)"
                             txt = f"{t['Tip_Domaci']}:{t['Tip_Hoste']}"
                             if str(t.get('Tip_Prodlouzeni','')) == 'ANO': txt += " (OT)"
                             txt += f" ({p} b.)"
@@ -748,9 +747,9 @@ def render_main_application():
                     else: 
                         txt = "-"
                 else:
-                    # --- SCÉNÁŘ B: ZÁPAS SE BUDE HRÁT (Maskujeme tipy) ---
+                    # --- SCÉNÁŘ B: ZÁPAS SE BUDE HRÁT ---
                     if t:
-                        # VALIDACE: Je tip platný? (Není to 0:0?)
+                        # Validace 0:0
                         try:
                             d = int(t.get('Tip_Domaci', 0))
                             h = int(t.get('Tip_Hoste', 0))
@@ -758,13 +757,12 @@ def render_main_application():
                             d, h = 0, 0
 
                         if d == 0 and h == 0:
-                            txt = "" # 0:0 považujeme za nenatipováno
+                            txt = "" 
                         else:
                             txt = "NATIPOVÁNO" 
                     else:
-                        txt = "" # Žádný záznam v DB
+                        txt = "" 
 
-                # Uložení do řádku
                 row[email] = txt
             
             data.append(row)
@@ -774,30 +772,33 @@ def render_main_application():
             cols_order = ['Zápas', 'Fáze', 'Výsledek'] + [str(u['Email']) for u in sorted_users]
             df_ov = pd.DataFrame(data, columns=cols_order)
 
-            # Vytvoření dvouřádkové hlavičky (MultiIndex)
-            header_tuples = []
+            # --- FIX 1: Index startuje od 1 ---
+            df_ov.index = df_ov.index + 1
 
-            # Pro info sloupce
+            # Vytvoření dvouřádkové hlavičky
+            header_tuples = []
             top_header = "📝 INFO O ZÁPASE"
             header_tuples.append((top_header, 'Soupeři'))
             header_tuples.append((top_header, 'Fáze'))
             header_tuples.append((top_header, 'Výsledek'))
 
-            # Pro uživatele
             for u in sorted_users:
                 email = str(u['Email'])
                 u_rank = rank_map.get(email, '-')
                 u_points = total_points.get(email, 0)
-
                 top_label = u['Jmeno']
                 bottom_label = f"{u_rank}. místo ({u_points} b.)"
                 header_tuples.append((top_label, bottom_label))
 
             df_ov.columns = pd.MultiIndex.from_tuples(header_tuples)
 
-            # Vykreslení
+            # --- FIX 2: Vynucení jednoho řádku (nowrap) ---
+            # Díky 'nowrap' se buňka roztáhne tak, aby se tam text vešel.
             st.dataframe(
-                df_ov.style.set_properties(**{'text-align': 'center', 'white-space': 'nowrap'}), 
+                df_ov.style.set_properties(**{
+                    'text-align': 'center', 
+                    'white-space': 'nowrap' 
+                }), 
                 use_container_width=True, 
                 height=600  
             )
