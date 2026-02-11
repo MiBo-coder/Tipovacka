@@ -688,7 +688,7 @@ def render_main_application():
     # 2. PŘEHLED
     with t_overview:
         st.header("Globální přehled tipů")
-        st.caption("Velká tabule se všemi zápasy a tipy. U budoucích zápasů vidíš, kdo už má splněno.")
+        st.caption("Velká tabule se všemi zápasy a tipy. Tady si můžeš zkontolovat, jestli už se na danej zápas poslal tip a máš ho uloženej.")
 
         # Příprava dat
         rank_map = df_rank.set_index('Email')['Pořadí'].to_dict()
@@ -717,7 +717,7 @@ def render_main_application():
 
             # Definice řádku - klíče pro indexové sloupce
             row = {
-                "#": row_idx,
+                "": row_idx,
                 "Zápas": f"{z['Domaci']} - {z['Hoste']}", 
                 "Fáze": faze, 
                 "Výsledek": vis_result
