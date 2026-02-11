@@ -717,7 +717,7 @@ def render_main_application():
 
             # Definice řádku - klíče pro indexové sloupce
             row = {
-                "": row_idx,
+                "#": row_idx,
                 "Zápas": f"{z['Domaci']} - {z['Hoste']}", 
                 "Fáze": faze, 
                 "Výsledek": vis_result
