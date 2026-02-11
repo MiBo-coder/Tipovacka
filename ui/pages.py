@@ -760,7 +760,7 @@ def render_main_application():
                         if d == 0 and h == 0:
                             txt = "" # 0:0 považujeme za nenatipováno
                         else:
-                            txt = "✅ NATIPOVÁNO" 
+                            txt = "NATIPOVÁNO" 
                     else:
                         txt = "" # Žádný záznam v DB
 
