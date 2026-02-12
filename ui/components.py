@@ -83,6 +83,8 @@ def apply_custom_css():
     div[data-baseweb="tab"] { flex: 0 1 auto !important; font-size: 1rem !important; font-weight: 600 !important; }
     div.block-container { background-color: rgba(255, 255, 255, 0.95); padding: 3rem 1rem; border-radius: 16px; max-width: 1200px; }
     .footer-warning { margin-top: 40px; padding: 15px; background-color: #fffbeb; border: 1px solid #fcd34d; color: #92400e; border-radius: 8px; font-size: 0.9em; text-align: center; font-weight: 500; }
+    
+    
 </style>
 """, unsafe_allow_html=True)
 

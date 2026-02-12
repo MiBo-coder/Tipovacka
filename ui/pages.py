@@ -256,8 +256,13 @@ def render_main_application():
         tips_by_match.setdefault(t['Zapas_ID'], []).append(t)
 
     # 1. ZÁKLADNÍ PRŮCHOD (Body za zápasy + Prodloužení)
+    unique_tips_map = {}
     for t in tipy:
-        zid = t['Zapas_ID']; email = str(t['Email'])
+        # Tímto se přepíší starší/duplicitní záznamy, zůstane jen jeden unikátní pro User+Zápas
+        unique_tips_map[(str(t['Email']), t['Zapas_ID'])] = t
+
+    # Nyní iterujeme jen přes unikátní tipy
+    for (email, zid), t in unique_tips_map.items():
         if zid in zapas_map and str(zapas_map[zid]['Skore_Domaci']) != "":
             z = zapas_map[zid]
             faze = str(z.get('Faze', '')).lower()
@@ -300,60 +305,88 @@ def render_main_application():
                 if u_win == winner:
                     bonus_odvaha[str(mt['Email'])] += 1
 
-    # 3. VÝPOČET: TIPER DNE (Zpětně podle dnů)
-    tiper_dne_log = [] # Data pro tabulku ve statistikách
-    dates = sorted(list(set([z['Datum_Obj'].date() for z in finished_matches if z.get('Datum_Obj')])))
+    # 3. VÝPOČET: TIPER DNE (Zpětně podle dnů, ale jen když je den KOMPLETNÍ)
+    tiper_dne_log = [] 
+    # Unikátní dny ze všech zápasů (i neodehraných, abychom věděli, co patří k jakému dni)
+    all_dates = sorted(list(set([z['Datum_Obj'].date() for z in zapasy if z.get('Datum_Obj')])))
 
-    for d_date in dates:
-        matches_that_day = [z for z in finished_matches if z.get('Datum_Obj') and z['Datum_Obj'].date() == d_date]
+    last_finished_day_stats = None # Pro info box (včerejší vítěz)
+
+    for d_date in all_dates:
+        # Všechny zápasy toho dne
+        matches_that_day = [z for z in zapasy if z.get('Datum_Obj') and z['Datum_Obj'].date() == d_date]
         if not matches_that_day: continue
 
-        daily_pts = {str(u['Email']): 0 for u in users}
-        for z in matches_that_day:
-            for u in users:
-                email = str(u['Email'])
-                t = tips_map.get((email, z['ID']))
-                if t:
-                    p, _, _, _ = spocitej_body_zapas(
-                        t['Tip_Domaci'], t['Tip_Hoste'], z['Skore_Domaci'], z['Skore_Hoste'], 
-                        z['Domaci'], z['Hoste'], z.get('Faze',''),
-                        t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
-                    )
-                    daily_pts[email] += p
+        # Podmínka: Všechny zápasy toho dne musí mít výsledek
+        day_finished = all(str(z['Skore_Domaci']) != "" for z in matches_that_day)
 
-        # Kdo byl nejlepší ten den?
-        if daily_pts:
-            max_val = max(daily_pts.values())
-            if max_val > 0: # Musí mít aspoň bod
-                winners = [e for e, s in daily_pts.items() if s == max_val]
-                bonus_val = 0.5 * len(matches_that_day)
+        if day_finished:
+            daily_pts = {str(u['Email']): 0 for u in users}
+            for z in matches_that_day:
+                # Použijeme unikátní mapu tipů z předchozího kroku (nutno mít aplikovaný fix z minula!)
+                # Pokud fix nemáš, použij: t = next((x for x in tipy if x['Zapas_ID'] == z['ID'] and str(x['Email']) == email), None)
+                for u in users:
+                    email = str(u['Email'])
+                    t = tips_map.get((email, z['ID']))
+                    if t:
+                        p, _, _, _ = spocitej_body_zapas(
+                            t['Tip_Domaci'], t['Tip_Hoste'], z['Skore_Domaci'], z['Skore_Hoste'], 
+                            z['Domaci'], z['Hoste'], z.get('Faze',''),
+                            t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
+                        )
+                        daily_pts[email] += p
+            
+            # Kdo vyhrál den?
+            if daily_pts:
+                max_val = max(daily_pts.values())
+                if max_val > 0:
+                    winners = [e for e, s in daily_pts.items() if s == max_val]
+                    bonus_val = 0.5 * len(matches_that_day) # 0.5 bodu za zápas
+                    
+                    winner_names = []
+                    for w in winners:
+                        bonus_tiper_dne[w] += bonus_val
+                        w_name = next((u['Jmeno'] for u in users if str(u['Email']) == w), w)
+                        winner_names.append(w_name)
+                    
+                    # Log pro statistiky
+                    tiper_dne_log.append({
+                        "Datum": d_date, 
+                        "Jméno": ", ".join(winner_names), 
+                        "Body ten den": max_val, 
+                        "Bonus": bonus_val
+                    })
+                    
+                    # Uložíme si poslední vyhodnocený den pro Info Box
+                    last_finished_day_stats = tiper_dne_log[-1]
 
-                # Zápis bonusů
-                for w in winners:
-                    bonus_tiper_dne[w] += bonus_val
-                    # Logování pro statistiku (jen pokud je to včera - pro "aktuálnost", nebo vše? Zadání říká "ukazovat kdo získal za předchozí den")
-                    # Uložíme si seznam všech vítězů dnů pro historii, filtrovat budeme při zobrazení
-                    w_name = next((u['Jmeno'] for u in users if str(u['Email']) == w), w)
-                    tiper_dne_log.append({"Datum": d_date, "Jméno": w_name, "Body ten den": max_val, "Bonus": bonus_val})
-
-    # Kompletace celkových bodů
+    # Kompletace celkových bodů a rozdělení bonusů pro tabulku
     # Bonus ostrostřelci (Původní logika)
     max_exact = 0; bonus_ostrostrelci = {}
     if exact_matches: max_exact = max(exact_matches.values())
     for email, count in exact_matches.items():
         bonus_ostrostrelci[email] = 6 if (is_tournament_over and count == max_exact and max_exact > 0) else 0
 
-    long_term_points = {}
+    long_term_points = {}     # Pouze body za medaile/vítěze
+    
     for u in users:
         email = str(u['Email'])
         lt_pts = spocitej_dlouhodobe_body(u, OFFICIAL_RESULTS)
-        # SEČTENÍ VŠECH NOVÝCH BONUSŮ ZDE:
-        total_bonus = lt_pts + bonus_ostrostrelci.get(email, 0) + bonus_odvaha.get(email, 0) + bonus_tiper_dne.get(email, 0)
-        long_term_points[email] = total_bonus
+        long_term_points[email] = lt_pts
+        
+    # Celkový součet pro řazení
+    total_points = {}
+    for u in users:
+        e = str(u['Email'])
+        total_bonus = (
+            long_term_points.get(e, 0) + 
+            bonus_ostrostrelci.get(e, 0) + 
+            bonus_odvaha.get(e, 0) + 
+            bonus_tiper_dne.get(e, 0)
+        )
+        total_points[e] = match_points.get(e, 0) + total_bonus
 
-    total_points = {e: match_points.get(e, 0) + long_term_points.get(e, 0) for e in match_points}
-
-    # PŘÍPRAVA DAT PRO ŽEBŘÍČEK
+    # PŘÍPRAVA DAT PRO ŽEBŘÍČEK - S novými sloupci
     rd = []
     for u in users:
         e = str(u['Email'])
@@ -363,7 +396,9 @@ def render_main_application():
             "Tým": u.get('Tym', '-'), 
             "Zaplaceno": str(u.get('Zaplaceno', 'NE')).upper(), 
             "Body Zápasy": match_points.get(e,0), 
-            "Bonusy": long_term_points.get(e,0), 
+            "Tiper Dne": bonus_tiper_dne.get(e, 0),    # Nový sloupec
+            "Odvaha": bonus_odvaha.get(e, 0),          # Nový sloupec
+            "Medaile/Vítěz": long_term_points.get(e, 0) + bonus_ostrostrelci.get(e, 0), # Sloučené dlouhodobé
             "Celkem": total_points.get(e,0)
         })
     df_rank = pd.DataFrame(rd).sort_values("Celkem", ascending=False).reset_index(drop=True)
@@ -374,73 +409,77 @@ def render_main_application():
         daily_msg = get_daily_message()
         my_row = df_rank[df_rank['Email'] == st.session_state['user_email']]
         
+        # Info o posledním tiperovi dne
+        tiper_msg_html = ""
+        if last_finished_day_stats:
+            d_str = last_finished_day_stats['Datum'].strftime('%d.%m.')
+            names = last_finished_day_stats['Jméno']
+            pts = last_finished_day_stats['Body ten den']
+            tiper_msg_html = f"<div style='margin-top: 8px; font-size: 0.9em; color: #059669; background-color: #ecfdf5; padding: 4px 8px; border-radius: 4px; display: inline-block;'>🏅 <b>Tiper dne ({d_str}):</b> {names} ({pts} b.)</div>"
+
         if not my_row.empty:
-            my_points = my_row.iloc[0]['Celkem']
+            my_points = float(my_row.iloc[0]['Celkem'])
             my_rank = my_row.iloc[0]['Pořadí']
-            leader_points = df_rank.iloc[0]['Celkem']
             
-            # 1. DEFINICE PROMĚNNÝCH (Aby nepadal NameError)
+            # --- NOVÉ: ROZPAD BODŮ (Sjednoceno na .1f) ---
+            p_match = float(my_row.iloc[0]['Body Zápasy'])
+            p_tiper = float(my_row.iloc[0]['Tiper Dne'])
+            p_odvaha = float(my_row.iloc[0]['Odvaha'])
+            
+            # FIX: Zde musíme volat původní název sloupce 'Medaile/Vítěz'
+            p_end = float(my_row.iloc[0]['Medaile/Vítěz']) 
+
+            # HTML string bez odsazení
+            breakdown_html = f"""<div style="font-size: 0.85em; color: #475569; margin-top: 4px; margin-bottom: 8px;">Zápasy: <b>{p_match:.1f}</b> | Tiper dne: <b>{p_tiper:.1f}</b> | Odvaha: <b>{p_odvaha:.1f}</b> | Koncový bonus: <b>{p_end:.1f}</b></div>"""
+
+            # Sousedé v žebříčku
             ahead_txt = ""
             behind_txt = ""
-            equals_txt = "" 
-            content_html = ""
-            
-            if leader_points == 0:
-                # --- STAV PŘED TURNAJEM (Všichni 0) ---
-                content_html = f"""
-                <div style="text-align: center; color: #475569; margin-bottom: 15px;">
-                    <div style="font-weight: bold; font-size: 1.1em; margin-bottom: 5px; color: #1e293b;">{daily_msg}</div>
-                    <div style="font-size: 0.9em;">Zatím všichni startujeme na stejné čáře. <b>0 bodů</b>.</div>
-                </div>
-                """
+            shared_txt = ""
+
+            # 1. KDO JE PŘEDE MNOU?
+            better_players = df_rank[df_rank['Celkem'].apply(lambda x: round(x, 1) > round(my_points, 1))]
+            if not better_players.empty:
+                closest_ahead = better_players.iloc[-1]
+                diff = round(float(closest_ahead['Celkem']) - my_points, 1)
+                ahead_txt = f"Ztráta na <b>{closest_ahead['Hráč']}</b>: <b>{diff:.1f} b.</b>"
             else:
-                # --- STAV BĚHEM TURNAJE ---
-                my_idx = df_rank.index[df_rank['Email'] == st.session_state['user_email']].tolist()[0]
-                
-                # Kdo je přede mnou?
-                if my_idx > 0:
-                    prev_row = df_rank.iloc[my_idx - 1]
-                    if prev_row['Celkem'] > my_points:
-                        ahead_txt = f"Před tebou: <b>{prev_row['Hráč']}</b> ({prev_row['Celkem']} b)"
-                    else:
-                        # Má stejně bodů jako ten před ním
-                        equals_txt = " (Dělíš se o pozici)"
-                else:
-                    ahead_txt = "Jsi ve vedení!"
-                    
-                # Kdo je za mnou?
-                if my_idx < len(df_rank) - 1:
-                    next_row = df_rank.iloc[my_idx + 1]
-                    if next_row['Celkem'] < my_points:
-                        behind_txt = f"Za tebou: <b>{next_row['Hráč']}</b> ({next_row['Celkem']} b)"
-                    else:
-                        # Pokud má ten za mnou stejně bodů, řeší to už equals_txt nahoře nebo je to v rámci skupiny
-                        pass
+                ahead_txt = "👑 Jsi ve vedení!"
 
-                # HTML KONSTRUKCE
-                # Oddělovač | zobrazíme jen když máme text na obou stranách
-                separator = '<span style="margin: 0 10px; color: #cbd5e1;">|</span>' if (ahead_txt and behind_txt) else ""
+            # 2. S KÝM SDÍLÍM POZICI?
+            same_points = df_rank[
+                (df_rank['Celkem'].apply(lambda x: round(x, 1) == round(my_points, 1))) & 
+                (df_rank['Email'] != st.session_state['user_email'])
+            ]
+            if not same_points.empty:
+                names = same_points['Hráč'].tolist()
+                if len(names) > 3: shared_txt = f" | Sdílíš pozici s <b>{len(names)}</b> hráči"
+                else: shared_txt = f" | Sdílíš s: <b>{', '.join(names)}</b>"
 
-                content_html = f"""
-                <div style="text-align: center; color: #1e293b; padding: 10px;">
-                    <div style="font-weight: bold; font-size: 1.1em; margin-bottom: 5px;">{daily_msg}</div>
-                    <div style="font-size: 1em; margin-bottom: 8px;">Aktuálně jsi na <b>{int(my_rank)}. místě</b> ({my_points} b){equals_txt}.</div>
-                    <div style="font-size: 0.85em; color: #64748b;">
-                        {ahead_txt} {separator} {behind_txt}
-                    </div>
-                </div>
-                """
-            
+            # 3. KDO JE ZA MNOU?
+            worse_players = df_rank[df_rank['Celkem'].apply(lambda x: round(x, 1) < round(my_points, 1))]
+            if not worse_players.empty:
+                closest_behind = worse_players.iloc[0]
+                diff = round(my_points - float(closest_behind['Celkem']), 1)
+                behind_txt = f" | Náskok na <b>{closest_behind['Hráč']}</b>: <b>{diff:.1f} b.</b>"
+            else:
+                behind_txt = " | Jsi poslední."
+
+            content_html = f"""
+<div style="text-align: center; color: #1e293b; padding: 15px; background-color: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0; margin-bottom: 20px;">
+<div style="font-weight: bold; font-size: 1.1em; margin-bottom: 5px; color: #334155;">{daily_msg}</div>
+<div style="font-size: 1.3em; margin-bottom: 2px;">Jsi na <b>{int(my_rank)}. místě</b> ({my_points:.1f} b)</div>
+{breakdown_html}
+<div style="font-size: 0.9em; color: #64748b;">
+{ahead_txt}{shared_txt}{behind_txt}
+</div>
+{tiper_msg_html}
+</div>
+"""
             st.markdown(content_html, unsafe_allow_html=True)
             
-            # Tiper dne
-            tiper_txt = ""
-            if tiper_dne_log:
-                last_td = tiper_dne_log[-1] # Poslední záznam
-                tiper_txt = f"🏅 Tiperem dne ({last_td['Datum'].strftime('%d.%m.')}) se stal **{last_td['Jméno']}** ({last_td['Body ten den']} b)."
-
         else:
-            st.warning("Zatím nejsi v žebříčku (nemáš body).")
+            st.warning("Zatím nejsi v žebříčku.")
 
     # Trendy
     prague_tz = pytz.timezone('Europe/Prague')  # 1. Musíme znát zónu
@@ -688,7 +727,7 @@ def render_main_application():
     # 2. PŘEHLED
     with t_overview:
         st.header("Globální přehled tipů")
-        st.caption("Velká tabule se všemi zápasy a tipy. Tady si můžeš zkontolovat, jestli už se na danej zápas poslal tip a máš ho uloženej.")
+        st.caption("Velká tabule se všemi zápasy a tipy. Tady si můžeš zkontolovat, jestli už si na danej zápas poslal tip a máš ho uloženej. Pokud ano, svítí ti u zápsu TIP.")
 
         # Příprava dat
         rank_map = df_rank.set_index('Email')['Pořadí'].to_dict()
@@ -696,7 +735,7 @@ def render_main_application():
         my_name = st.session_state.get('user_name', '') # Potřebujeme pro styling
 
         # 1. SEŘAZENÍ HRÁČŮ (JÁ PRVNÍ, PAK OSTATNÍ)
-        sorted_users = sorted(users, key=lambda u: 0 if str(u['Email']) == my_email else 1)
+        sorted_users = sorted(users, key=lambda u: -1 if str(u['Email']) == my_email else rank_map.get(str(u['Email']), 999))
 
         # 2. PŘÍPRAVA DAT
         all_matches_sorted = sorted(zapasy, key=lambda x: int(x['ID']))
@@ -708,14 +747,23 @@ def render_main_application():
         row_idx = 1
 
         for z in all_matches_sorted:
+            # Zjištění stavu zápasu
             is_finished = (str(z['Skore_Domaci']) != "")
-            faze = z.get('Faze', '')
             
-            vis_result = f"{z['Skore_Domaci']}:{z['Skore_Hoste']}" if is_finished else "-"
+            # Kontrola času (LOCK)
+            prague_tz = pytz.timezone('Europe/Prague')
+            now_prague = datetime.now(prague_tz)
+            match_dt = z.get('Datum_Obj')
+            if match_dt and match_dt.tzinfo is None: match_dt = prague_tz.localize(match_dt)
+            
+            # Zápas je "viditelný" (revealed), pokud je odehrán NEBO už uplynul čas začátku (zamčeno)
+            is_revealed = is_finished or (match_dt and now_prague > match_dt)
+
+            faze = z.get('Faze', '')
+            vis_result = f"{z['Skore_Domaci']}:{z['Skore_Hoste']}" if is_finished else (f"{z['Datum_Obj'].strftime('%d.%m. %H:%M')}" if match_dt else "-")
             if is_finished and str(z.get('Prodlouzeni','')) == 'ANO': 
                 vis_result += " (OT)"
 
-            # Definice řádku - klíče pro indexové sloupce
             row = {
                 "#": row_idx,
                 "Zápas": f"{z['Domaci']} - {z['Hoste']}", 
@@ -724,13 +772,14 @@ def render_main_application():
             }
             row_idx += 1
 
-            # Průchod přes hráče
             for u in sorted_users:
                 email = str(u['Email'])
                 t = tips_map.get((email, z['ID']))
-
-                if is_finished:
-                    # SCÉNÁŘ A: ZÁPAS SKONČIL
+                
+                txt = "-" # Default
+                
+                if is_revealed:
+                    # Ukazujeme tipy, protože je zamčeno nebo dohráno
                     if t:
                         d = int(t.get('Tip_Domaci', 0))
                         h = int(t.get('Tip_Hoste', 0))
@@ -738,31 +787,31 @@ def render_main_application():
                         if d == 0 and h == 0:
                             txt = "-"
                         else:
-                            p, ie, _, _ = spocitej_body_zapas(
-                                t['Tip_Domaci'], t['Tip_Hoste'], 
-                                z['Skore_Domaci'], z['Skore_Hoste'], 
-                                z['Domaci'], z['Hoste'], z.get('Faze',''),
-                                t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
-                            )
-                            txt = f"{t['Tip_Domaci']}:{t['Tip_Hoste']}"
-                            if str(t.get('Tip_Prodlouzeni','')) == 'ANO': txt += " (OT)"
-                            txt += f" ({p} b.)"
-                            if ie: txt = f"⭐ {txt}"
-                    else: 
-                        txt = "-"
+                            ot_mark = " (OT)" if str(t.get('Tip_Prodlouzeni','')) == 'ANO' else ""
+                            txt = f"{d}:{h}{ot_mark}"
+                            
+                            # Body počítáme a zobrazujeme JEN pokud je zápas dohrán (is_finished)
+                            if is_finished:
+                                p, ie, _, _ = spocitej_body_zapas(
+                                    t['Tip_Domaci'], t['Tip_Hoste'], 
+                                    z['Skore_Domaci'], z['Skore_Hoste'], 
+                                    z['Domaci'], z['Hoste'], z.get('Faze',''),
+                                    t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
+                                )
+                                txt += f" ({p} b.)"
+                                if ie: txt = f"⭐ {txt}"
+                    else:
+                        txt = "❌" # Nenatipováno a zamčeno
                 else:
-                    # SCÉNÁŘ B: ZÁPAS SE BUDE HRÁT
+                    # Zápas je v budoucnu -> jen info, zda má natipováno
                     if t:
                         try:
                             d, h = int(t.get('Tip_Domaci', 0)), int(t.get('Tip_Hoste', 0))
                         except: d, h = 0, 0
-                        txt = "NATIPOVÁNO" if (d != 0 or h != 0) else ""
+                        txt = "TIP" if (d != 0 or h != 0) else "" # Změněno na ikonku pro lepší přehlednost
                     else:
                         txt = "" 
 
-                # Klíčem je jméno hráče (aby odpovídalo hlavičce pro styling)
-                # POZOR: Tady si musíme dát pozor na unikátnost. 
-                # Pro jednoduchost použijeme Email jako klíč v datech, ale hlavičku přepíšeme.
                 row[email] = txt
             
             data.append(row)
@@ -928,61 +977,112 @@ def render_main_application():
         st.header("Celkové pořadí")
 
         if len(df_rank) > 0:
-            s1 = df_rank.iloc[0]['Celkem']; s2 = df_rank.iloc[1]['Celkem'] if len(df_rank) > 1 else 0; s3 = df_rank.iloc[2]['Celkem'] if len(df_rank) > 2 else 0
+            # 1. Výpočet referenčních bodů (s1, s2, s3)
+            # Bereme data z df_rank, která jsou stále čísla (float/int)
+            s1 = df_rank.iloc[0]['Celkem']
+            s2 = df_rank.iloc[1]['Celkem'] if len(df_rank) > 1 else 0
+            s3 = df_rank.iloc[2]['Celkem'] if len(df_rank) > 2 else 0
 
-            df_rank['Ztráta na 1. místo'] = df_rank['Celkem'].apply(lambda x: s1 - x if s1 > x else "")
-            df_rank['Ztráta na 2. místo'] = df_rank['Celkem'].apply(lambda x: s2 - x if s2 > x else "")
-            df_rank['Ztráta na 3. místo'] = df_rank['Celkem'].apply(lambda x: s3 - x if s3 > x else "")
+            # 2. Výpočet ztrát (zatím jako ČÍSLA nebo None, ne stringy!)
+            # Důležité: Necháváme df_rank čisté s čísly, formátování děláme až pro zobrazení
+            df_rank['Ztráta na 1. místo'] = df_rank['Celkem'].apply(lambda x: s1 - x if s1 > x else None)
+            df_rank['Ztráta na 2. místo'] = df_rank['Celkem'].apply(lambda x: s2 - x if s2 > x else None)
+            df_rank['Ztráta na 3. místo'] = df_rank['Celkem'].apply(lambda x: s3 - x if s3 > x else None)
 
-            cols_to_fix = ['Body Zápasy', 'Bonusy', 'Celkem']
-            for col in cols_to_fix:
-                df_rank[col] = df_rank[col].astype(str) + " b."
-            for col in ['Ztráta na 1. místo', 'Ztráta na 2. místo', 'Ztráta na 3. místo']:
-                df_rank[col] = df_rank[col].apply(lambda x: f"-{x} b." if x != "" else "")
-
+        # 3. Filtr týmu
         at = sorted(list(set(df_rank['Tým'].replace('', '-'))))
         vybrany_tym = st.selectbox("Filtr týmu", ["Všechny"] + at)
-        if vybrany_tym != "Všechny": df_rank = df_rank[df_rank['Tým'] == vybrany_tym]
+        
+        # Lokální proměnná pro filtrovaná data (nepřepisujeme globální df_rank, abychom ho nerozbili)
+        df_show = df_rank.copy()
+        if vybrany_tym != "Všechny": 
+            df_show = df_show[df_show['Tým'] == vybrany_tym]
 
-        # PŘIDÁNO 'Poradi' DO SLOUPCŮ
-        cols = ['Pořadí', 'Vývoj pořadí', 'Hráč', 'Tým', 'Body Zápasy', 'Bonusy', 'Celkem', 'Ztráta na 1. místo', 'Ztráta na 2. místo', 'Ztráta na 3. místo']
+        # --- NOVÁ TABULKA ŽEBŘÍČKU (V2 - Zvýrazněná & Opravená) ---
+        
+        # 4. Definice sloupců a názvů
+        cols_map = {
+            'Pořadí': 'Pořadí',
+            'Vývoj pořadí': 'Trend',
+            'Hráč': 'Hráč',
+            'Tým': 'Tým',
+            'Celkem': 'CELKEM',         
+            'Body Zápasy': 'Zápasy',
+            'Tiper Dne': 'Tiper\nDne',
+            'Odvaha': 'Bonus\nOdvaha',
+            'Medaile/Vítěz': 'Koncový\nbonus',
+            'Ztráta na 1. místo': 'Ztráta\nna 1.',
+            'Ztráta na 2. místo': 'Ztráta\nna 2.',
+            'Ztráta na 3. místo': 'Ztráta\nna 3.'
+        }
+        
+        source_cols = [
+            'Pořadí', 'Vývoj pořadí', 'Hráč', 'Tým', 
+            'Celkem', 
+            'Body Zápasy', 'Tiper Dne', 'Odvaha', 'Medaile/Vítěz', 
+            'Ztráta na 1. místo', 'Ztráta na 2. místo', 'Ztráta na 3. místo'
+        ]
+        
+        # 5. Vytvoření display dataframe
+        df_display = df_show[source_cols].copy().rename(columns=cols_map)
+        
+        # 6. Formátování BODOVÝCH sloupců (na 1 desetinné místo + " b.")
+        format_cols_points = ['CELKEM', 'Zápasy', 'Tiper\nDne', 'Bonus\nOdvaha', 'Koncový\nbonus']
+        for col in format_cols_points:
+            if col in df_display.columns:
+                # x může být float nebo int. F-string :.1f zvládne obojí.
+                df_display[col] = df_display[col].apply(lambda x: f"{float(x):.1f} b." if pd.notnull(x) and x != "" else "")
 
-        def highlight_rows(s):
-            # 1. Zjistíme, jestli je to řádek přihlášeného hráče
+        # 7. Formátování ZTRÁTOVÝCH sloupců (na 1 desetinné místo + " b.")
+        format_cols_loss = ['Ztráta\nna 1.', 'Ztráta\nna 2.', 'Ztráta\nna 3.']
+        for col in format_cols_loss:
+            if col in df_display.columns:
+                # Zde máme None pro prázdné hodnoty (viz krok 2)
+                df_display[col] = df_display[col].apply(lambda x: f"-{float(x):.1f} b." if pd.notnull(x) and x != "" else "")
+
+        # 8. Funkce pro barvení
+        def highlight_rows_v2(s):
             is_me = (s['Hráč'] == st.session_state['user_name'])
-
-            # 2. Zjistíme reálné umístění (1, 2, 3...)
-            rank = s['Pořadí']
-
-            # Získáme hodnotu bodů (je to string "0 b.", musíme to ošetřit)
-            points_str = str(s['Celkem']).replace(" b.", "")
             try:
-                points = float(points_str)
+                rank = s['Pořadí']
+                # Body už jsou string, ale pro barvení řádků nám stačí vědět rank
+                # (Předpokládáme, že kdo má rank 1, má body > 0, pokud ne, nevadí)
+                # Pro jistotu zkontrolujeme, zda 'CELKEM' není prázdné
+                p_str = str(s['CELKEM'])
+                has_points = " b." in p_str and p_str != "0.0 b."
             except:
-                points = 0
+                rank = 999; has_points = False
 
             css = ''
-
-            # Barvíme medaile POUZE pokud má hráč víc než 0 bodů
-            if points > 0:
+            # Barvíme medaile
+            if has_points:
                 if rank == 1: css = 'background-color: #FFD700; color: black;'
                 elif rank == 2: css = 'background-color: #C0C0C0; color: black;'
                 elif rank == 3: css = 'background-color: #CD7F32; color: black;'
 
-            # 3. Zvýraznění pro mě (aplikuje se vždy)
+            # Můj řádek
             if is_me:
-                # Pokud nemám medaili (nebo se ještě nehraje), dám si světle modré pozadí
                 if not css: css = 'background-color: #e8f4f8; color: black;'
-                css += ' font-weight: bold; border: 2px solid #007bff;'
-
+                css += ' font-weight: bold; border-top: 2px solid #007bff; border-bottom: 2px solid #007bff;'
             return [css] * len(s)
 
-        # Přejmenování sloupce pro hezčí zobrazení
-        df_display = df_rank[cols].rename(columns={'Pořadí': 'Pořadí'})
+        styled = df_display.style.apply(highlight_rows_v2, axis=1)
+        
+        # ZVÝRAZNĚNÍ SLOUPCE CELKEM (Bez barvy pozadí, jen rámeček a font)
+        # Tím pádem bude prosvítat barva řádku (zlatá/stříbrná)
+        styled = styled.set_properties(subset=['CELKEM'], **{
+            'font-weight': '900',                # Extra tučné
+            'border-left': '3px solid #000000',  # Silný levý okraj
+            'border-right': '3px solid #000000', # Silný pravý okraj
+            'font-size': '1.1em'
+        })
 
-        styled_rank = df_rank[cols].style.apply(highlight_rows, axis=1)
-        st.dataframe(styled_rank, use_container_width=True, hide_index=True)
-
+        st.dataframe(
+            styled, 
+            use_container_width=True, 
+            hide_index=True,
+            height=600
+        )
     # 5. STATISTIKY
     with t_stats:
         st.header("Statistika nuda je, má však cenné údaje")
