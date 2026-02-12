@@ -437,7 +437,7 @@ def render_main_application():
             behind_txt = ""
             shared_txt = ""
 
-            # 1. KDO JE PŘEDE MNOU?
+            # 1. KDO JE PŘEDE MNOU? 
             better_players = df_rank[df_rank['Celkem'].apply(lambda x: round(x, 1) > round(my_points, 1))]
             if not better_players.empty:
                 closest_ahead = better_players.iloc[-1]
