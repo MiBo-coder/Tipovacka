@@ -73,7 +73,7 @@ def spocitej_body_zapas(tip_d, tip_h, real_d, real_h, team_d, team_h, faze, tip_
     
     # Celkem (nemůže být záporné)
     total_points = max(0, base_points + ot_points)
-    scored = (total_points > 0 or ot_points != 0)
+    scored = (total_points > 0)
     
     return total_points, is_exact, scored, ot_points
 
