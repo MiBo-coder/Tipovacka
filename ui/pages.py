@@ -132,14 +132,15 @@ def render_main_application():
     info_box_placeholder = st.container()
     
     # ==========================================
-    # 3. NEJBLIŽŠÍ ZÁPAS
+    # 3. DASHBOARD (VÝSLEDKY | NEJBLIŽŠÍ ZÁPAS | CHAT)
     # ==========================================
+    
+    # A) Příprava dat pro NEJBLIŽŠÍ ZÁPAS
     prague_tz = pytz.timezone('Europe/Prague')
     now_prague = datetime.now(prague_tz)
     upcoming_match = None
     
     # Najdeme nejbližší budoucí zápas
-    # Seřadíme zápasy časově, abychom našli ten opravdu první budoucí
     sorted_matches = sorted([z for z in zapasy if str(z['Skore_Domaci']) == ""], key=lambda x: x.get('Datum_Obj') or datetime.max)
     
     for z in sorted_matches:
@@ -151,73 +152,72 @@ def render_main_application():
                 match_dt_aware = match_dt
                 break
     
-    if upcoming_match:
-        delta = match_dt_aware - now_prague
-        hours, remainder = divmod(delta.seconds, 3600); minutes, _ = divmod(remainder, 60)
-        
-        # Statistiky pro tento zápas
-        pd_next, ph_next, _ = match_stats_cache.get(upcoming_match['ID'], (0,0,0))
-        f_d = get_flag(upcoming_match['Domaci']); f_h = get_flag(upcoming_match['Hoste'])
-
-        # Vykreslení Boxu
-        st.markdown(f"""
-        <div class="next-match-box" style="margin-top: 20px; margin-bottom: 20px;">
-            <div style="font-size: 0.9em; text-transform: uppercase; letter-spacing: 1px; color: #64748b; margin-bottom: 5px;">⏱️ Nejbližší zápas (za {delta.days}d {hours}h {minutes}m)</div>
-            <div style="font-size: 1.4em; font-weight: bold;">
-                {f_d} {upcoming_match['Domaci']} <span style="color:#000000">:</span> {upcoming_match['Hoste']} {f_h}
-            </div>
-            <div style="font-size: 0.8em; color: #475569; margin-top: 5px;">
-                Jsk tipujeme na tento zápas: Domácí <b>{pd_next}%</b> : <b>{ph_next}%</b> Hosté
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # ==========================================
-    # 4. RYCHLÝ PŘEHLED (NOVINKY & CHAT) - Místo Sidebaru
-    # ==========================================
-    # Zobrazíme jen pokud už turnaj běží (jsou výsledky) nebo se kecá
+    # B) Příprava dat pro VÝSLEDKY a CHAT
     finished_matches = [z for z in zapasy if str(z['Skore_Domaci']) != ""]
     
-    if finished_matches or chat_data:
-        c_news1, c_news2 = st.columns(2)
-        
-        # A) Poslední 2 výsledky
-        with c_news1:
-            st.markdown("<div style='font-size: 0.8em; color: #64748b; font-weight: bold; margin-bottom: 5px;'>POSLEDNÍ VÝSLEDKY</div>", unsafe_allow_html=True)
-            if finished_matches:
-                # Vezmeme poslední 2 a otočíme je (nejnovější nahoře)
-                last_matches = finished_matches[-2:]
-                for m in reversed(last_matches):
-                    f_d = get_flag(m['Domaci']); f_h = get_flag(m['Hoste'])
-                    # Vykreslení karty
-                    st.markdown(f"""
-                    <div style="border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px; background-color: white; margin-bottom: 8px;">
-                        <div style="font-weight: bold; font-size: 0.9em;">
-                            {f_d} {m['Domaci']} <span style="color:#ef4444">{m['Skore_Domaci']}:{m['Skore_Hoste']}</span> {m['Hoste']} {f_h}
-                        </div>
+    # C) VYKRESLENÍ TŘÍ SLOUPCŮ
+    # Poměr [1, 1.2, 1] dá prostřednímu bloku trochu víc místa, aby karta dýchala
+    col_results, col_next, col_chat = st.columns([1, 1.2, 1])
+    
+    # --- 1. SLOUPEC: POSLEDNÍ VÝSLEDKY ---
+    with col_results:
+        st.markdown("<div style='font-size: 0.8em; color: #64748b; font-weight: bold; margin-bottom: 5px; text-align: center;'>POSLEDNÍ VÝSLEDKY</div>", unsafe_allow_html=True)
+        if finished_matches:
+            # Vezmeme poslední 2 a otočíme je
+            last_matches = finished_matches[-2:]
+            for m in reversed(last_matches):
+                f_d = get_flag(m['Domaci']); f_h = get_flag(m['Hoste'])
+                st.markdown(f"""
+                <div style="border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px; background-color: white; margin-bottom: 8px;">
+                    <div style="font-weight: bold; font-size: 0.9em; text-align: center;">
+                        {f_d} {m['Domaci']} <span style="color:#ef4444">{m['Skore_Domaci']}:{m['Skore_Hoste']}</span> {m['Hoste']} {f_h}
                     </div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.caption("Čekání na první zápas")
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.caption("Čekání na první zápas")
 
-        # B) Poslední 2 zprávy z chatu
-        with c_news2:
-            st.markdown("<div style='font-size: 0.8em; color: #64748b; font-weight: bold; margin-bottom: 5px;'>💬 DISKUZE</div>", unsafe_allow_html=True)
-            if chat_data:
-                # Vezmeme poslední 2 a otočíme je
-                last_msgs = chat_data[-2:]
-                for msg in reversed(last_msgs):
-                    # Zkrácení zprávy, kdyby byla moc dlouhá (max 40 znaků)
-                    msg_txt = (msg['Zprava'][:40] + '..') if len(msg['Zprava']) > 40 else msg['Zprava']
-                    st.markdown(f"""
-                    <div style="border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px; background-color: white; margin-bottom: 8px;">
-                        <div style="font-size: 0.85em;">
-                            <b>{msg['Hrac']}:</b> {msg_txt}
-                        </div>
+    # --- 2. SLOUPEC: NEJBLIŽŠÍ ZÁPAS (UPROSTŘED) ---
+    with col_next:
+        if upcoming_match:
+            delta = match_dt_aware - now_prague
+            hours, remainder = divmod(delta.seconds, 3600); minutes, _ = divmod(remainder, 60)
+            
+            pd_next, ph_next, _ = match_stats_cache.get(upcoming_match['ID'], (0,0,0))
+            f_d = get_flag(upcoming_match['Domaci']); f_h = get_flag(upcoming_match['Hoste'])
+
+            # Upravil jsem margin-top na 0, aby to lícovalo s nadpisy okolních sloupců
+            st.markdown(f"""
+            <div class="next-match-box" style="margin-top: 0px; margin-bottom: 20px;">
+                <div style="font-size: 0.75em; text-transform: uppercase; letter-spacing: 1px; color: #64748b; margin-bottom: 5px;">⏱️ Nejbližší zápas (za {delta.days}d {hours}h {minutes}m)</div>
+                <div style="font-size: 1.3em; font-weight: bold;">
+                    {f_d} {upcoming_match['Domaci']} <span style="color:#000000">:</span> {upcoming_match['Hoste']} {f_h}
+                </div>
+                <div style="font-size: 0.75em; color: #475569; margin-top: 5px;">
+                    Tipujeme: Domácí <b>{pd_next}%</b> : <b>{ph_next}%</b> Hosté
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+             st.info("Žádný nadcházející zápas.")
+
+    # --- 3. SLOUPEC: DISKUZE ---
+    with col_chat:
+        st.markdown("<div style='font-size: 0.8em; color: #64748b; font-weight: bold; margin-bottom: 5px; text-align: center;'>💬 DISKUZE</div>", unsafe_allow_html=True)
+        if chat_data:
+            last_msgs = chat_data[-2:]
+            for msg in reversed(last_msgs):
+                # Zkrácení zprávy
+                msg_txt = (msg['Zprava'][:35] + '..') if len(msg['Zprava']) > 35 else msg['Zprava']
+                st.markdown(f"""
+                <div style="border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px; background-color: white; margin-bottom: 8px;">
+                    <div style="font-size: 0.85em;">
+                        <b>{msg['Hrac']}:</b> {msg_txt}
                     </div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.caption("V diskuzi je ticho.")
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.caption("V diskuzi je ticho.")
 
     st.write("") # Malá mezera před medailemi
 
@@ -1304,7 +1304,7 @@ def render_main_application():
             * Minimální počet bodů při správném určení vítěze jsou **2 body**.
             * **+2 body** bonus za trefení přesného výsledku.
             * **+2 body** bonus, pokud hraje Česko.
-        * **Playoff:** Všechny body za zápas se násobí **1.5x** (kromě českého bonusu).
+        * **Playoff:** Všechny body za zápas se násobí **1.5x** (kromě bonusů, včetně českého).
         * **Tipy na medailisty:**
             * **+15 bodů** za vítěze turnaje.
             * **+4 body** za každého trefeného medailistu.
