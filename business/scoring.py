@@ -11,7 +11,6 @@ from utils.config import TIMEZONE
 def spocitej_body_zapas(tip_d, tip_h, real_d, real_h, team_d, team_h, faze, tip_ot='', real_ot=''):
     """
     Spočítá body za jeden zápas.
-    PŮVODNÍ FUNKCE z tipovacka_12.py
     
     Returns:
         (points, is_exact, scored, ot_points)
@@ -28,52 +27,59 @@ def spocitej_body_zapas(tip_d, tip_h, real_d, real_h, team_d, team_h, faze, tip_
     except (ValueError, TypeError):
         return 0, False, False, 0
     
+    # 1. URČENÍ VÍTĚZE (1 = domácí, 2 = hosté)
+    winner_real = 1 if rd > rh else 2
+    winner_tip = 1 if td > th else (2 if th > td else 0)
+    
+    # --- GATEKEEPER: KONTROLA VÍTĚZE ---
+    # Pokud se vítěz neshoduje, okamžitě končíme. Žádné body, žádné bonusy.
+    if winner_real != winner_tip:
+        return 0, False, False, 0
+
+    # Pokud jsme tady, vítěz je SPRÁVNĚ. Jdeme počítat body.
     base_points = 0
     ot_points = 0
     is_exact = False
     
-    # 1. ZÁKLADNÍ BODY - Vítěz
-    winner_real = 1 if rd > rh else 2
-    winner_tip = 1 if td > th else (2 if th > td else 0)
+    # 2. VÝPOČET ZÁKLADNÍCH BODŮ (Rozdíl skóre)
+    # Spočítáme rozdíl v gólech
+    diff = abs(rd - td) + abs(rh - th)
     
-    if winner_real == winner_tip:
-        # Spočítáme rozdíl v gólech
-        diff = abs(rd - td) + abs(rh - th)
-        
-        # Body podle přesnosti (max 7, min 2)
-        base_points = max(2, 7 - diff)
-        
-        # Bonus za přesný tip
-        if td == rd and th == rh:
-            base_points += 2
-            is_exact = True
+    # Body podle přesnosti (max 7, min 2)
+    base_points = max(2, 7 - diff)
     
-    # 2. PLAYOFF MULTIPLIKÁTOR
+    # Bonus za přesný tip
+    if td == rd and th == rh:
+        base_points += 2
+        is_exact = True
+    
+    # 3. PLAYOFF MULTIPLIKÁTOR
     faze_lower = str(faze).lower()
     is_playoff = any(x in faze_lower for x in ["playoff", "finále", "o 3.", "čtvrt", "semi"])
     
     if is_playoff:
         base_points = math.ceil(base_points * 1.5)
     
-    # 3. BONUS ZA ČESKÉ TÝMY
+    # 4. BONUS ZA ČESKÉ TÝMY
     match_teams = (str(team_d) + " " + str(team_h)).lower()
     if ("česko" in match_teams or "czech" in match_teams) and base_points > 0:
         base_points += 2
     
-    # 4. BONUS/PENALIZACE ZA PRODLOUŽENÍ
+    # 5. BONUS/PENALIZACE ZA PRODLOUŽENÍ
+    # Počítáme jen pokud byl tipnut rozdíl o 1 gól (podmínka pro možnost OT)
     if abs(td - th) == 1:
         tip_ot_bool = str(tip_ot).strip().upper() == "ANO"
         real_ot_bool = str(real_ot).strip().upper() == "ANO"
         
         if tip_ot_bool:
             if real_ot_bool:
-                ot_points = 1
+                ot_points = 1  # Trefil jsi, že bude OT
             else:
-                ot_points = -1
+                ot_points = -1 # Myslel sis OT, ale nebylo
     
     # Celkem (nemůže být záporné)
     total_points = max(0, base_points + ot_points)
-    scored = (total_points > 0)
+    scored = (total_points > 0 or ot_points != 0)
     
     return total_points, is_exact, scored, ot_points
 
