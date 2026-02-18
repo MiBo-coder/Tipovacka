@@ -1200,13 +1200,13 @@ def render_main_application():
                 col_read1, col_read2 = st.columns(2)
                 
                 with col_read1:
-                    st.markdown("Nejčitelnější týmy (Top 3)**")
+                    st.markdown("**Nejčitelnější týmy (Top 3)**")
                     top_3 = df_teams.head(3).copy()
                     top_3['Průměr bodů'] = top_3['Průměr bodů'].apply(lambda x: f"{x:.2f}")
                     st.dataframe(top_3.style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
                     
                 with col_read2:
-                    st.markdown("Nejhůř čitelné týmy (Bottom 3)**")
+                    st.markdown("**Nejhůř čitelné týmy (Bottom 3)**")
                     bot_3 = df_teams.tail(3).sort_values("Průměr bodů", ascending=True).copy()
                     bot_3['Průměr bodů'] = bot_3['Průměr bodů'].apply(lambda x: f"{x:.2f}")
                     st.dataframe(bot_3.style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
