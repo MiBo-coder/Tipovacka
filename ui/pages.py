@@ -1186,7 +1186,6 @@ def render_main_application():
                 
                 with col_read1:
                     st.markdown("**Nejčitelnější týmy (Top 3)**")
-                    st.caption("Týmy, na kterých se průměrně bere nejvíc bodů.")
                     top_3 = df_teams.head(3).copy()
                     # Formátování na 2 desetinná místa
                     top_3['Průměr bodů'] = top_3['Průměr bodů'].apply(lambda x: f"{x:.2f}")
@@ -1198,7 +1197,6 @@ def render_main_application():
                     
                 with col_read2:
                     st.markdown("**Nejhůř čitelné týmy (Bottom 3)**")
-                    st.caption("Týmy, které nejčastěji " + "trhají tikety" + ".")
                     bot_3 = df_teams.tail(3).sort_values("Průměr bodů", ascending=True).copy()
                     bot_3['Průměr bodů'] = bot_3['Průměr bodů'].apply(lambda x: f"{x:.2f}")
                     st.dataframe(
