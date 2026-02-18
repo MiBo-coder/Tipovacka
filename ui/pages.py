@@ -1125,10 +1125,10 @@ def render_main_application():
         st.divider()
         
         st.subheader("🔮 Čitelnost týmů")
-        st.caption("Průměrný počet čistých bodů (Základ + Přesný tip + OT + Odvaha), který tým přináší.")
+        st.caption("Průměrný počet čistých bodů, který tým přináší (ignoruje nenatipované zápasy).")
 
         if finished_matches:
-            # {tym: [seznam_čistých_bodů_z_každého_tipu]}
+            # {tym: [seznam_průměrů_z_zapasu]}
             team_stats_map = {}
 
             for z in finished_matches:
@@ -1137,13 +1137,17 @@ def render_main_application():
                 if not match_tips: continue
 
                 # --- 1. PŘÍPRAVA PRO BONUS ZA ODVAHU ---
-                # Musíme vědět, jak na tom tým byl v % sázek
-                cnt_d = sum(1 for mt in match_tips if mt['Tip_Domaci'] > mt['Tip_Hoste'])
-                cnt_h = sum(1 for mt in match_tips if mt['Tip_Hoste'] > mt['Tip_Domaci'])
-                total_tips = len(match_tips)
+                # Musíme filtrovat tipy i pro výpočet procent, aby 0:0 nezkreslovalo "dav"
+                valid_tips_for_perc = [t for t in match_tips if not (int(t['Tip_Domaci']) == 0 and int(t['Tip_Hoste']) == 0)]
                 
-                perc_d = cnt_d / total_tips if total_tips > 0 else 0
-                perc_h = cnt_h / total_tips if total_tips > 0 else 0
+                if not valid_tips_for_perc: continue # Pokud nikdo nenatipoval, jdeme dál
+
+                cnt_d = sum(1 for mt in valid_tips_for_perc if int(mt['Tip_Domaci']) > int(mt['Tip_Hoste']))
+                cnt_h = sum(1 for mt in valid_tips_for_perc if int(mt['Tip_Hoste']) > int(mt['Tip_Domaci']))
+                total_tips = len(valid_tips_for_perc)
+                
+                perc_d = cnt_d / total_tips
+                perc_h = cnt_h / total_tips
                 
                 rd, rh = int(z['Skore_Domaci']), int(z['Skore_Hoste'])
                 real_winner = 'd' if rd > rh else ('h' if rh > rd else 'draw')
@@ -1153,44 +1157,44 @@ def render_main_application():
                 if real_winner == 'd' and perc_d < 0.20: is_underdog_win = True
                 if real_winner == 'h' and perc_h < 0.20: is_underdog_win = True
 
-                # --- 2. VÝPOČET BODŮ PRO KAŽDÝ TIP ---
+                # --- 2. VÝPOČET BODŮ PRO JEDNOTLIVÉ TIPY ---
                 match_sum_points = 0
                 valid_tips_count = 0
 
                 for t in match_tips:
                     td, th = int(t['Tip_Domaci']), int(t['Tip_Hoste'])
                     
-                    # A) ZÁKLADNÍ BODY + PŘESNÝ TIP (Rekonstrukce logiky)
+                    # === FILTR: IGNOROVAT 0:0 (NENATIPOVÁNO) ===
+                    if td == 0 and th == 0:
+                        continue
+                    # ===========================================
+
+                    # A) ZÁKLADNÍ BODY + PŘESNÝ TIP
                     pure_points = 0
-                    
                     tip_winner = 'd' if td > th else ('h' if th > td else 'draw')
                     
-                    # Pokud trefil vítěze
                     if tip_winner == real_winner and real_winner != 'draw':
                         diff = abs(rd - td) + abs(rh - th)
                         base = max(2, 7 - diff)
                         pure_points += base
                         
-                        # Bonus za přesný tip
                         if td == rd and th == rh:
                             pure_points += 2
                     
                     # B) OT BONUS / PENALIZACE
-                    # Logika: Pokud je rozdíl v tipu 1 gól, řešíme OT
                     if abs(td - th) == 1:
                         tip_ot_bool = str(t.get('Tip_Prodlouzeni', '')).upper() == 'ANO'
                         real_ot_bool = str(z.get('Prodlouzeni', '')).upper() == 'ANO'
                         
                         if tip_ot_bool:
-                            if real_ot_bool: pure_points += 1 # Trefil remízu po 60min
-                            else: pure_points -= 1            # Netrefil (skončilo v základu)
+                            if real_ot_bool: pure_points += 1
+                            else: pure_points -= 1
                     
                     # C) BONUS ZA ODVAHU
-                    # Pokud trefil vítěze a ten vítěz byl underdog
                     if is_underdog_win and tip_winner == real_winner:
                         pure_points += 1
 
-                    # Ošetření záporných bodů (jen pro jistotu, aby průměr nebyl divoký, i když -1 je teoreticky možná)
+                    # Ošetření záporných bodů
                     match_sum_points += max(0, pure_points)
                     valid_tips_count += 1
                 
@@ -1198,7 +1202,6 @@ def render_main_application():
                 if valid_tips_count > 0:
                     avg_match_pts = match_sum_points / valid_tips_count
                     
-                    # Přičtení do statistik obou týmů
                     team_stats_map.setdefault(z['Domaci'], []).append(avg_match_pts)
                     team_stats_map.setdefault(z['Hoste'], []).append(avg_match_pts)
 
