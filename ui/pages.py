@@ -1125,10 +1125,10 @@ def render_main_application():
         st.divider()
         
         st.subheader("🔮 Čitelnost týmů")
-        st.caption("Průměrný počet bodů (očištěný o bonusy), který tým přinese sázkařům.")
+        st.caption("Průměrný počet čistých bodů (Základ + Přesný tip + OT + Odvaha), který tým přináší.")
 
         if finished_matches:
-            # {tym: [seznam_prumernych_zisku]}
+            # {tym: [seznam_čistých_bodů_z_každého_tipu]}
             team_stats_map = {}
 
             for z in finished_matches:
@@ -1136,58 +1136,73 @@ def render_main_application():
                 match_tips = tips_by_match.get(zid, [])
                 if not match_tips: continue
 
-                # Analýza fáze a bonusů
-                faze_lower = str(z.get('Faze', '')).lower()
-                is_playoff = any(x in faze_lower for x in ["playoff", "finále", "o 3.", "čtvrt", "semi"])
-                is_czech_game = "česko" in str(z['Domaci']).lower() or "česko" in str(z['Hoste']).lower()
+                # --- 1. PŘÍPRAVA PRO BONUS ZA ODVAHU ---
+                # Musíme vědět, jak na tom tým byl v % sázek
+                cnt_d = sum(1 for mt in match_tips if mt['Tip_Domaci'] > mt['Tip_Hoste'])
+                cnt_h = sum(1 for mt in match_tips if mt['Tip_Hoste'] > mt['Tip_Domaci'])
+                total_tips = len(match_tips)
+                
+                perc_d = cnt_d / total_tips if total_tips > 0 else 0
+                perc_h = cnt_h / total_tips if total_tips > 0 else 0
+                
+                rd, rh = int(z['Skore_Domaci']), int(z['Skore_Hoste'])
+                real_winner = 'd' if rd > rh else ('h' if rh > rd else 'draw')
+                
+                # Byl vítěz outsider? (< 20%)
+                is_underdog_win = False
+                if real_winner == 'd' and perc_d < 0.20: is_underdog_win = True
+                if real_winner == 'h' and perc_h < 0.20: is_underdog_win = True
 
-                total_pts_normalized = 0
+                # --- 2. VÝPOČET BODŮ PRO KAŽDÝ TIP ---
+                match_sum_points = 0
                 valid_tips_count = 0
 
                 for t in match_tips:
-                    # 1. Získáme reálné body včetně všech bonusů
-                    p_raw, _, _, ot_points = spocitej_body_zapas(
-                        t['Tip_Domaci'], t['Tip_Hoste'], z['Skore_Domaci'], z['Skore_Hoste'], 
-                        z['Domaci'], z['Hoste'], z.get('Faze',''),
-                        t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
-                    )
-
-                    # 2. NORMALIZACE (Očištění)
-                    # Musíme postupovat pozpátku oproti scoring.py
+                    td, th = int(t['Tip_Domaci']), int(t['Tip_Hoste'])
                     
-                    p_clean = p_raw
-
-                    # A) Odečteme body za OT (ty se nenásobí v playoff)
-                    p_clean -= ot_points
-
-                    # B) Odečteme Český bonus (ten se přičítá AŽ PO násobení playoff v scoring.py)
-                    # Podmínka v scoring.py je: if czech and base_points > 0: +2
-                    # Takže odečítáme jen, pokud zbyly nějaké body
-                    if is_czech_game and p_clean >= 2: 
-                        p_clean -= 2
+                    # A) ZÁKLADNÍ BODY + PŘESNÝ TIP (Rekonstrukce logiky)
+                    pure_points = 0
                     
-                    # C) Očištění o Playoff násobič
-                    # V scoring.py je: ceil(points * 1.5). 
-                    # My to pro statistiku vydělíme. Nemusíme řešit ceil, desetinná čísla nám ve statistice nevadí.
-                    if is_playoff and p_clean > 0:
-                        p_clean = p_clean / 1.5
-
-                    # Ošetření záporných hodnot (pro jistotu, kdyby odečet OT šel do mínusu)
-                    # I když OT penalizace (-1) je validní součást "nečitelnosti", 
-                    # pro účely "zisku" nás zajímá hlavně, kolik to hodilo.
-                    # Necháme to takto, záporná hodnota správně penalizuje tým v žebříčku.
+                    tip_winner = 'd' if td > th else ('h' if th > td else 'draw')
                     
-                    total_pts_normalized += p_clean
+                    # Pokud trefil vítěze
+                    if tip_winner == real_winner and real_winner != 'draw':
+                        diff = abs(rd - td) + abs(rh - th)
+                        base = max(2, 7 - diff)
+                        pure_points += base
+                        
+                        # Bonus za přesný tip
+                        if td == rd and th == rh:
+                            pure_points += 2
+                    
+                    # B) OT BONUS / PENALIZACE
+                    # Logika: Pokud je rozdíl v tipu 1 gól, řešíme OT
+                    if abs(td - th) == 1:
+                        tip_ot_bool = str(t.get('Tip_Prodlouzeni', '')).upper() == 'ANO'
+                        real_ot_bool = str(z.get('Prodlouzeni', '')).upper() == 'ANO'
+                        
+                        if tip_ot_bool:
+                            if real_ot_bool: pure_points += 1 # Trefil remízu po 60min
+                            else: pure_points -= 1            # Netrefil (skončilo v základu)
+                    
+                    # C) BONUS ZA ODVAHU
+                    # Pokud trefil vítěze a ten vítěz byl underdog
+                    if is_underdog_win and tip_winner == real_winner:
+                        pure_points += 1
+
+                    # Ošetření záporných bodů (jen pro jistotu, aby průměr nebyl divoký, i když -1 je teoreticky možná)
+                    match_sum_points += max(0, pure_points)
                     valid_tips_count += 1
                 
+                # --- 3. ULOŽENÍ PRŮMĚRU ZÁPASU ---
                 if valid_tips_count > 0:
-                    avg_match_pts = total_pts_normalized / valid_tips_count
+                    avg_match_pts = match_sum_points / valid_tips_count
                     
                     # Přičtení do statistik obou týmů
                     team_stats_map.setdefault(z['Domaci'], []).append(avg_match_pts)
                     team_stats_map.setdefault(z['Hoste'], []).append(avg_match_pts)
 
-            # Finální agregace a Top/Bottom 3
+            # --- 4. VYKRESLENÍ TABULEK ---
             final_data = []
             for team, avgs in team_stats_map.items():
                 if avgs:
@@ -1211,7 +1226,7 @@ def render_main_application():
                     bot_3['Průměr bodů'] = bot_3['Průměr bodů'].apply(lambda x: f"{x:.2f}")
                     st.dataframe(bot_3.style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
 
-                st.info("ℹ️ *Statistika je očištěna o Playoff násobič (1.5x) a Český bonus (+2b), aby byly body porovnatelné.*")
+                st.info("ℹ️ *Data zahrnují: Základní body, přesný tip, OT bonus/penalizaci a bonus za odvahu. Nezahrnují: Playoff násobič, Český bonus, Tiper dne.*")
         
         else:
             st.info("Čekáme na první odehrané zápasy.")
