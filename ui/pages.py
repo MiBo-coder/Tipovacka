@@ -1125,59 +1125,74 @@ def render_main_application():
         st.divider()
         
         st.subheader("🔮 Čitelnost týmů")
-        st.caption("Průměrný počet bodů, který tým přinese sázkařům na jeden zápas.")
+        st.caption("Průměrný počet bodů (očištěný o bonusy), který tým přinese sázkařům.")
 
         if finished_matches:
-            # Slovník: {nazev_tymu: [seznam_prumernych_zisku_z_jeho_zapasu]}
+            # {tym: [seznam_prumernych_zisku]}
             team_stats_map = {}
 
             for z in finished_matches:
                 zid = z['ID']
                 match_tips = tips_by_match.get(zid, [])
-                
-                # Pokud na zápas nikdo netipoval, přeskočíme
                 if not match_tips: continue
+
+                # Analýza fáze a bonusů
+                faze_lower = str(z.get('Faze', '')).lower()
+                is_playoff = any(x in faze_lower for x in ["playoff", "finále", "o 3.", "čtvrt", "semi"])
+                is_czech_game = "česko" in str(z['Domaci']).lower() or "česko" in str(z['Hoste']).lower()
 
                 total_pts_normalized = 0
                 valid_tips_count = 0
-                
-                # Detekce Česka pro korekci
-                is_czech_game = "česko" in str(z['Domaci']).lower() or "česko" in str(z['Hoste']).lower()
 
                 for t in match_tips:
-                    # Spočítáme body
-                    p, _, _, _ = spocitej_body_zapas(
+                    # 1. Získáme reálné body včetně všech bonusů
+                    p_raw, _, _, ot_points = spocitej_body_zapas(
                         t['Tip_Domaci'], t['Tip_Hoste'], z['Skore_Domaci'], z['Skore_Hoste'], 
                         z['Domaci'], z['Hoste'], z.get('Faze',''),
                         t.get('Tip_Prodlouzeni', ''), z.get('Prodlouzeni', '')
                     )
+
+                    # 2. NORMALIZACE (Očištění)
+                    # Musíme postupovat pozpátku oproti scoring.py
                     
-                    # KOREKCE: Odečteme "vlastenecký bonus" 2 body pro statistické účely
-                    if is_czech_game and p > 0:
-                        p = max(0, p - 2)
+                    p_clean = p_raw
+
+                    # A) Odečteme body za OT (ty se nenásobí v playoff)
+                    p_clean -= ot_points
+
+                    # B) Odečteme Český bonus (ten se přičítá AŽ PO násobení playoff v scoring.py)
+                    # Podmínka v scoring.py je: if czech and base_points > 0: +2
+                    # Takže odečítáme jen, pokud zbyly nějaké body
+                    if is_czech_game and p_clean >= 2: 
+                        p_clean -= 2
                     
-                    total_pts_normalized += p
+                    # C) Očištění o Playoff násobič
+                    # V scoring.py je: ceil(points * 1.5). 
+                    # My to pro statistiku vydělíme. Nemusíme řešit ceil, desetinná čísla nám ve statistice nevadí.
+                    if is_playoff and p_clean > 0:
+                        p_clean = p_clean / 1.5
+
+                    # Ošetření záporných hodnot (pro jistotu, kdyby odečet OT šel do mínusu)
+                    # I když OT penalizace (-1) je validní součást "nečitelnosti", 
+                    # pro účely "zisku" nás zajímá hlavně, kolik to hodilo.
+                    # Necháme to takto, záporná hodnota správně penalizuje tým v žebříčku.
+                    
+                    total_pts_normalized += p_clean
                     valid_tips_count += 1
                 
-                # Průměr bodů na jednoho sázkaře v tomto konkrétním zápase
                 if valid_tips_count > 0:
                     avg_match_pts = total_pts_normalized / valid_tips_count
                     
-                    # Zapíšeme tento průměr OBĚMA týmům
-                    # Tím se automaticky řeší počet zápasů (budeme dělat průměr z tohoto seznamu)
+                    # Přičtení do statistik obou týmů
                     team_stats_map.setdefault(z['Domaci'], []).append(avg_match_pts)
                     team_stats_map.setdefault(z['Hoste'], []).append(avg_match_pts)
 
-            # Finální výpočet průměru za všechny odehrané zápasy týmu
+            # Finální agregace a Top/Bottom 3
             final_data = []
             for team, avgs in team_stats_map.items():
-                if avgs: # Tímto vyloučíme týmy bez zápasů (i když logika výše by je tam ani nedala)
+                if avgs:
                     grand_avg = sum(avgs) / len(avgs)
-                    final_data.append({
-                        "Tým": team,
-                        "Průměr bodů": grand_avg,
-                        "Zápasů": len(avgs) # Jen pro kontrolu, ve finále to schováme
-                    })
+                    final_data.append({"Tým": team, "Průměr bodů": grand_avg})
             
             if final_data:
                 df_teams = pd.DataFrame(final_data).sort_values("Průměr bodů", ascending=False)
@@ -1185,27 +1200,18 @@ def render_main_application():
                 col_read1, col_read2 = st.columns(2)
                 
                 with col_read1:
-                    st.markdown("**Nejčitelnější týmy (Top 3)**")
+                    st.markdown("Nejčitelnější týmy (Top 3)**")
                     top_3 = df_teams.head(3).copy()
-                    # Formátování na 2 desetinná místa
                     top_3['Průměr bodů'] = top_3['Průměr bodů'].apply(lambda x: f"{x:.2f}")
-                    st.dataframe(
-                        top_3[['Tým', 'Průměr bodů']].style.set_properties(**{'text-align': 'center'}), 
-                        use_container_width=True, 
-                        hide_index=True
-                    )
+                    st.dataframe(top_3.style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
                     
                 with col_read2:
-                    st.markdown("**Nejhůř čitelné týmy (Bottom 3)**")
+                    st.markdown("Nejhůř čitelné týmy (Bottom 3)**")
                     bot_3 = df_teams.tail(3).sort_values("Průměr bodů", ascending=True).copy()
                     bot_3['Průměr bodů'] = bot_3['Průměr bodů'].apply(lambda x: f"{x:.2f}")
-                    st.dataframe(
-                        bot_3[['Tým', 'Průměr bodů']].style.set_properties(**{'text-align': 'center'}), 
-                        use_container_width=True, 
-                        hide_index=True
-                    )
+                    st.dataframe(bot_3.style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
 
-                st.info("ℹ️ *Poznámka: Statistika ukazuje průměrný bodový zisk na jeden zápas týmu. U Česka je odečten bonus +2 body pro objektivní srovnání.*")
+                st.info("ℹ️ *Statistika je očištěna o Playoff násobič (1.5x) a Český bonus (+2b), aby byly body porovnatelné.*")
         
         else:
             st.info("Čekáme na první odehrané zápasy.")
