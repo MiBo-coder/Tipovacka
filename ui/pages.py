@@ -84,6 +84,17 @@ def render_main_application():
     zapasy, tipy, users, config, chat_data = load_all_data()
     ws_zapasy, ws_tipy, ws_users, ws_nastaveni, ws_chat = get_worksheets_resources()
     
+    # --- AKTUALIZACE OFICIÁLNÍCH VÝSLEDKŮ Z DATABÁZE ---
+    # Přepíšeme prázdný import z config.py reálnými daty z listu Nastavení
+    OFFICIAL_RESULTS = {
+        'winner': config.get('vitez_turnaje', ''),
+        'medals': [
+            config.get('med_1', ''), 
+            config.get('med_2', ''), 
+            config.get('med_3', '')
+        ]
+    }
+    
     # --- PŘÍPRAVA STATISTIK ZÁPASŮ (CACHE) ---
     match_stats_cache = {}
     tips_by_match_id = {}
