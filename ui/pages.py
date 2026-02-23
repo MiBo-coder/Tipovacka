@@ -1432,6 +1432,7 @@ def render_main_application():
         with col_hist_h:
             st.subheader("🏒 Hokej")
             history_hockey = [
+                {"Rok": 2026, "Turnaj": "ZOH - Itálie", "🥇 1. Místo": "Tyrda", "🥈 2. Místo": "Lukáš", "🥉 3. Místo": "Honza K."},
                 {"Rok": 2025, "Turnaj": "MS - Švédsko/Dánsko", "🥇 1. Místo": "Brácha Tyrdy", "🥈 2. Místo": "Lukáš", "🥉 3. Místo": "Antonín"},
                 {"Rok": 2024, "Turnaj": "MS - Česko", "🥇 1. Místo": "Luděk / Příbor", "🥈 2. Místo": "-", "🥉 3. Místo": "Tony B."},
                 {"Rok": 2023, "Turnaj": "MS - Finsko/Lotyšsko", "🥇 1. Místo": "Tyrda", "🥈 2. Místo": "MiBo", "🥉 3. Místo": "Honza K."},
